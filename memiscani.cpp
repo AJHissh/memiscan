@@ -14,6 +14,9 @@
 #include <math.h>
 #include <richedit.h>
 #include <inttypes.h>
+#include <random>          
+#include <set>
+#include "Zydis.h"
 
 #ifndef EM_SETBKGNDCOLOR
 #define EM_SETBKGNDCOLOR (WM_USER+67)
@@ -97,6 +100,7 @@ typedef struct {
 #define ID_BTN_BUILD_SC     74
 #define ID_EDIT_SC_RESULT   75
 #define ID_BTN_COPY_SC      76
+
 #define ID_BTN_SEND_TO_BUILDER 77
 #define ID_BTN_ASSEMBLER    80
 #define ID_EDIT_ASM_SRC     81
@@ -104,6 +108,20 @@ typedef struct {
 #define ID_EDIT_ASM_OUT     83
 #define ID_BTN_ASM_TO_SC    84
 
+#define ID_BTN_COPY_ADDR_CLIP 102
+
+#define ID_BTN_TRIGGER           800
+#define ID_BTN_TRIGGER_CLEAR_LOG 801
+#define ID_EDIT_TRIGGER_ADDR     802
+#define ID_CMB_TRIGGER_METHOD    803
+#define ID_EDIT_APC_TID          804
+#define ID_EDIT_SENTINEL_ADDR2   805
+#define ID_EDIT_SENTINEL_VAL2    806
+#define ID_BTN_CHECK_SENTINEL2   807
+#define ID_BTN_READ_OUTPUT       808
+#define ID_EDIT_OUTPUT_ADDR      809
+#define ID_EDIT_OUTPUT_SIZE      810
+#define ID_LST_TRIGGER_LOG       811
 
 #define ID_BTN_COPY_HEX        90
 #define ID_BTN_COPY_RESULTS    91
@@ -117,6 +135,97 @@ typedef struct {
 #define ID_BTN_AOB_PATCH       99
 #define ID_BTN_REATTACH       101
 #define ID_BTN_COPY_ADDR_CLIP 102
+
+HWND hPageVerify       = NULL;
+HWND hLstVerify        = NULL;
+HWND hBtnSnapshotVerify= NULL;
+HWND hBtnCheckValues   = NULL;
+HWND hBtnCheckModules  = NULL;
+HWND hBtnCheckThreads  = NULL;
+HWND hBtnCheckMemory   = NULL;
+HWND hBtnCheckSentinel = NULL;
+HWND hStaticSnapStatus = NULL;
+HWND hEditSentinelAddr = NULL;
+HWND hEditSentinelVal  = NULL;
+HWND hBtnAnalyzeDump = NULL;
+ 
+#define ID_BTN_SNAPSHOT_VERIFY  410
+#define ID_BTN_CHECK_VALUES     411
+#define ID_BTN_CHECK_MODULES    412
+#define ID_BTN_CHECK_THREADS    413
+#define ID_BTN_CHECK_MEMORY     414
+#define ID_BTN_CHECK_SENTINEL   415
+#define ID_EDIT_SENTINEL_ADDR   416
+#define ID_EDIT_SENTINEL_VAL    417
+#define ID_BTN_VERIFY_ALL       418
+ 
+struct VerifySnapshot {
+    std::vector<std::string>  modules;      
+    std::vector<DWORD>        threadIds;
+    struct MemRec {
+        uintptr_t base; SIZE_T size; DWORD protect; DWORD type;
+    };
+    std::vector<MemRec>       memRegions;  
+    std::vector<std::pair<LPVOID,int>> writtenValues; 
+    bool taken   = false;
+    SYSTEMTIME snapshotTime = {};
+};
+static VerifySnapshot g_vsnap;
+
+struct PointerChain {
+    std::string name;
+    std::string moduleName;          
+    uintptr_t   baseOffset;          
+    std::vector<intptr_t> offsets;   
+    uintptr_t   lastResolved = 0;
+    int         lastValue = 0;
+    bool        lastOk = false;
+};
+static std::vector<PointerChain> g_chains;
+
+
+struct HookRecord {
+    LPVOID            target = nullptr;
+    SIZE_T            patchSize = 0;
+    std::vector<BYTE> originalBytes;
+    LPVOID            trampolineAddr = nullptr;
+    SIZE_T            trampolineSize = 0;
+    bool              installed = false;
+    std::string       description;
+};
+static std::vector<HookRecord> g_hooks;
+
+struct PatchRecord {
+    LPVOID            target = nullptr;
+    SIZE_T            patchSize = 0;
+    std::vector<BYTE> originalBytes;
+    LPVOID            caveAddr = nullptr;   
+    SIZE_T            caveSize = 0;
+    bool              installed = false;
+    std::string       kind;                 
+    std::string       description;
+};
+static std::vector<PatchRecord> g_patches;
+
+
+struct ExportEntry {
+    std::string moduleName;
+    std::string funcName;
+    DWORD       ordinal = 0;
+    LPVOID      address = nullptr;
+};
+static std::vector<ExportEntry> g_exports;
+
+
+struct HandleInfoEntry {
+    USHORT      handleValue = 0;
+    BYTE        objType = 0;
+    std::string typeName;
+    std::string objName;
+    PVOID       object = nullptr;
+    ULONG       grantedAccess = 0;
+};
+static std::vector<HandleInfoEntry> g_handles;
 
 #define ID_LST_WINDOWS        110
 #define ID_BTN_REFRESH_WNDS   111
@@ -132,6 +241,7 @@ typedef struct {
 #define ID_BTN_RESUME_THR    232
 #define ID_BTN_KILL_THREAD   233
 #define ID_BTN_CAVE_INJECT   234
+#define ID_BTN_COPY_TID_TO_APC    235
 
 #define ID_EDIT_WND_MSG      215
 #define ID_EDIT_WND_WPARAM   216
@@ -171,6 +281,7 @@ typedef struct {
 #define ID_EDIT_SC_EXPORT_FUNC 255
 #define ID_BTN_SC_EXEC_DLL_EXPORT 256
 #define ID_BTN_SC_BROWSE_DLL  257
+#define ID_BTN_ANALYZE_DUMP  258
 
 #define ID_BTN_HELP_MODULES     300
 #define ID_BTN_HELP_INJECT      301
@@ -180,6 +291,62 @@ typedef struct {
 #define TIMER_FREEZE        100
 #define TIMER_WATCH         101
 #define TIMER_HEALTH        102
+
+#define ID_BTN_USE_LAST_TID       812
+
+#define ID_LST_CHAINS         900
+#define ID_EDIT_CHAIN_NAME    901
+#define ID_EDIT_CHAIN_MOD     902
+#define ID_EDIT_CHAIN_BASE    903
+#define ID_EDIT_CHAIN_OFFS    904
+#define ID_BTN_CHAIN_ADD      905
+#define ID_BTN_CHAIN_DEL      906
+#define ID_BTN_CHAIN_RESOLVE  907
+#define ID_BTN_CHAIN_SAVE     908
+#define ID_BTN_CHAIN_LOAD     909
+#define ID_BTN_CHAIN_REFRESH  910
+#define ID_BTN_CALLGRAPH      920
+#define ID_EDIT_CG_DEPTH      921
+#define ID_LST_CALLGRAPH      922
+#define ID_EDIT_CG_ADDR       923
+#define ID_LST_HOOKS          930
+#define ID_BTN_HOOK_INSTALL   931
+#define ID_BTN_HOOK_RESTORE   932
+#define ID_BTN_HOOK_REFRESH   933
+#define ID_EDIT_HOOK_ADDR     934
+#define ID_EDIT_HOOK_SC       935
+#define ID_BTN_HOOK_HELP      936
+
+#define ID_LST_EXPORTS        940
+#define ID_BTN_EXP_REFRESH    941
+#define ID_BTN_EXP_GOTO       942
+#define ID_EDIT_EXP_FILTER    943
+#define ID_BTN_EXP_FILTER     944
+
+#define ID_LST_HANDLES        950
+#define ID_BTN_HND_REFRESH    951
+#define ID_EDIT_HND_FILTER    952
+#define ID_BTN_HND_FILTER     953
+
+#define ID_EDIT_PATCH_ADDR       970
+#define ID_EDIT_PATCH_SIZE       971
+#define ID_BTN_PATCH_READ        972
+#define ID_EDIT_PATCH_BYTES      973
+#define ID_BTN_PATCH_DISASM      974
+#define ID_EDIT_PATCH_DISASM     975
+#define ID_EDIT_PATCH_PAYLOAD    976
+#define ID_BTN_PATCH_WRITEBYTES  977
+#define ID_EDIT_PATCH_NOPLEN     978
+#define ID_BTN_PATCH_NOP         979
+#define ID_EDIT_PATCH_JMPTARGET  980
+#define ID_BTN_PATCH_SHORTJMP    981
+#define ID_BTN_PATCH_NEARJMP     982
+#define ID_EDIT_PATCH_CAVESIZE   983
+#define ID_BTN_PATCH_CAVE        984
+#define ID_LST_PATCHES           985
+#define ID_BTN_PATCH_RESTORE     986
+#define ID_BTN_PATCH_REFRESH     987
+#define ID_BTN_PATCH_HELP        988
 
 #define DT_INT32  0
 #define DT_INT16  1
@@ -240,7 +407,6 @@ HWND hHdrWndWriter, hLstWindows, hEditWndText;
 
 HWND hStaticSelWnd, hEditWndMsg, hEditWndWParam, hEditWndLParam, hEditWndCmdId;
 
-HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd, hPageDetect, hPageShellcode;
 HWND hLstDetect, hHdrDetect, hEditDump;
 HWND hBtnDetectScan, hBtnDetectCopy, hBtnDetectClear, hBtnExecShellcode, hBtnDumpSelected, hBtnExecDllExport, hBtnExecAPC;
 HWND hChkDetectRx, hChkDetectStomp, hChkDetectMapped, hChkDetectThread;
@@ -249,7 +415,29 @@ HWND hChkDetectRwx, hChkDetectManMap, hChkDetectHijack, hChkDetectPath;
 HWND hChkProtect;
 HWND hChkSyscall;
 
+HWND hPageTrigger, hLstTriggerLog, hEditTriggerAddr, hCmbTriggerMethod, hEditApcTid;
+HWND hEditSentinelAddr2, hEditSentinelVal2, hBtnCheckSentinel2, hBtnReadOutput;
+HWND hEditOutputAddr, hEditOutputSize, hBtnTrigger, hBtnTriggerClearLog;
+
+HWND hPagePtrHook = NULL;      
+HWND hPageExpHnd  = NULL;       
+HWND hLstChains   = NULL, hEditChainName = NULL, hEditChainMod = NULL;
+HWND hEditChainBase = NULL, hEditChainOffs = NULL;
+HWND hLstCallGraph = NULL, hEditCgAddr = NULL, hEditCgDepth = NULL;
+HWND hLstHooks = NULL, hEditHookAddr = NULL, hEditHookSc = NULL;
+HWND hLstExports = NULL, hEditExpFilter = NULL;
+HWND hLstHandles = NULL, hEditHndFilter = NULL;
+
+HWND hPagePatcher = NULL;
+HWND hEditPatchAddr = NULL, hEditPatchSize = NULL, hEditPatchBytes = NULL;
+HWND hEditPatchDisasm = NULL, hEditPatchPayload = NULL;
+HWND hEditPatchNopLen = NULL, hEditPatchJmpTarget = NULL, hEditPatchCaveSize = NULL;
+HWND hLstPatches = NULL;
+
+HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd, hPageDetect, hPageShellcode;
+
 HWND hWndAssembler = NULL;
+
 HFONT hFontTitle, hFontSection, hFontNormal, hFontMono, hFontSmall;
 HBRUSH hBrushWindow, hBrushEdit, hBrushList, hBrushStatus;
 static WNDPROC g_origScanEditProc = NULL;
@@ -258,10 +446,35 @@ static HMODULE g_hRichEdit = NULL;
 static HWND    g_targetWnd = NULL;  
 static BYTE    freezeBytes[16] = {};
 static size_t  freezeByteLen   = 0;
+DWORD g_lastCreatedThreadId = 0;
+
 
 HANDLE hProcess   = NULL;
 DWORD  currentPID = 0;
-LPVOID selectedAddress = NULL;
+
+static uintptr_t g_PtrKey = []() {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    return gen();
+}();
+
+inline uintptr_t EncryptPointer(LPVOID ptr) {
+    return reinterpret_cast<uintptr_t>(ptr) ^ g_PtrKey;
+}
+
+inline LPVOID DecryptPointer(uintptr_t enc) {
+    return reinterpret_cast<LPVOID>(enc ^ g_PtrKey);
+}
+
+uintptr_t encryptedSelectedAddress = 0;  
+
+LPVOID GetSelectedAddress() {
+    return encryptedSelectedAddress ? DecryptPointer(encryptedSelectedAddress) : nullptr;
+}
+
+void SetSelectedAddress(LPVOID addr) {
+    encryptedSelectedAddress = addr ? EncryptPointer(addr) : 0;
+}
 
 std::vector<LPVOID>             scanResults;
 std::vector<std::vector<BYTE>>  scanPrevVals;
@@ -296,7 +509,20 @@ void ScanCodeCaves();
 void ListRemoteThreads();
 void DoFirstScan();
 void DoNextScan();
+
+void TakeVerifySnapshot();
+void VerifyCheckValues();
+void VerifyCheckModules();
+void VerifyCheckThreads();
+void VerifyCheckMemory();
+void VerifyCheckSentinel();
+void RunVerifyAll();
+size_t      GetDataTypeSize(int dt);
+std::string FormatTypedValue(const BYTE* data, int dt);
+void        ClearEditText(HWND hEdit);
+
 void ScanForPointers(LPVOID targetAddr);
+
 std::string FormatMemorySize(SIZE_T bytes);
 LPVOID GetBaseAddress();
 int    ReadValueFromAddress(LPVOID address);
@@ -305,6 +531,9 @@ bool WriteTypedValue(LPVOID address, const char* str, int dt, bool protect, bool
 void WriteStringToAddress(LPVOID address, bool utf16, bool useSyscall=false);
 static bool SyscallWriteVirtualMemory(HANDLE process, PVOID baseAddress, const void* buffer, SIZE_T bufferSize, SIZE_T* bytesWritten);
 static bool SyscallProtectVirtualMemory(HANDLE process, PVOID baseAddress, SIZE_T regionSize, DWORD newProtect, DWORD* oldProtect);
+
+static HMODULE FindModuleByPath(DWORD pid, const char* fullPath);
+static DWORD GetExportRVA(const char* dllPath, const char* funcName);
 
 void CopyEditToClipboard(HWND hEdit);
 void AppendEditText(HWND hEdit, const char* line);
@@ -318,6 +547,576 @@ void InjectIntoCodeCave();
 void KillSelectedThread();
 void UpdateSelectedWindowInfo(HWND target);
 void RunInjectionDetection();
+
+
+
+void LogToTrigger(const char* msg, bool error = false);
+void TriggerShellcode();
+
+
+LPVOID ResolveChain(const PointerChain& c, bool& ok);
+void RefreshChainsUI();
+void AddChainFromUI();
+void DeleteSelectedChain();
+void ResolveChainToSelected();
+void SaveChainsToFile();
+void LoadChainsFromFile();
+void TraceCallGraph();
+void InstallTrampolineHook();
+void RestoreSelectedHook();
+void RefreshHooksUI();
+void EnumerateExports();
+void RefreshExportsUI();
+void GoToSelectedExport();
+void EnumerateHandles();
+void RefreshHandlesUI();
+void PatcherReadAndShow();
+void PatcherDisassembleAtAddr();
+void PatcherWriteRawBytes();
+void PatcherNopOut();
+void PatcherShortJmp();
+void PatcherNearJmp();
+void PatcherInstallCodeCave();
+void PatcherRestoreSelected();
+void PatcherRefreshList();
+static int DisasmOne(const BYTE* b, size_t left, uint64_t rva, char* out, size_t outSz);
+
+
+
+static void VerifySep(const char* title) {
+    char line[256];
+    sprintf_s(line, "\r\n─── %s ───", title);
+    AppendEditText(hLstVerify, line);
+}
+ 
+
+static void VerifyLine(bool ok, const char* fmt, ...) {
+    char body[512];
+    va_list ap; va_start(ap, fmt); vsprintf_s(body, fmt, ap); va_end(ap);
+    char line[600];
+    sprintf_s(line, "  %s  %s", ok ? "[ OK ]" : "[ !! ]", body);
+    AppendEditText(hLstVerify, line);
+}
+ 
+
+void TakeVerifySnapshot() {
+    if (!hProcess || !currentPID) {
+        LogToStatus("Attach to a process first", true); return;
+    }
+    g_vsnap = VerifySnapshot{};  
+    GetLocalTime(&g_vsnap.snapshotTime);
+ 
+    {
+        HMODULE mods[1024]; DWORD needed = 0;
+        if (EnumProcessModules(hProcess, mods, sizeof(mods), &needed)) {
+            DWORD cnt = needed / sizeof(HMODULE);
+            for (DWORD i = 0; i < cnt; i++) {
+                char path[MAX_PATH] = {};
+                GetModuleFileNameExA(hProcess, mods[i], path, MAX_PATH);
+                MODULEINFO mi = {}; GetModuleInformation(hProcess, mods[i], &mi, sizeof(mi));
+                char rec[MAX_PATH + 64];
+                sprintf_s(rec, "0x%llX|%llu|%s",
+                    (unsigned long long)(uintptr_t)mi.lpBaseOfDll,
+                    (unsigned long long)mi.SizeOfImage, path);
+                g_vsnap.modules.push_back(rec);
+            }
+        }
+    }
+ 
+   
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 te; te.dwSize = sizeof(te);
+            if (Thread32First(snap, &te)) {
+                do {
+                    if (te.th32OwnerProcessID == currentPID)
+                        g_vsnap.threadIds.push_back(te.th32ThreadID);
+                } while (Thread32Next(snap, &te));
+            }
+            CloseHandle(snap);
+        }
+    }
+ 
+  
+    {
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        LPVOID addr = si.lpMinimumApplicationAddress;
+        while (addr < si.lpMaximumApplicationAddress) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+            if (mbi.State == MEM_COMMIT &&
+                (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+                VerifySnapshot::MemRec r;
+                r.base = (uintptr_t)mbi.BaseAddress;
+                r.size = mbi.RegionSize;
+                r.protect = mbi.Protect;
+                r.type = mbi.Type;
+                g_vsnap.memRegions.push_back(r);
+            }
+            addr = (LPVOID)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
+        }
+    }
+ 
+    for (LPVOID a : scanResults) {
+        int v = 0; SIZE_T r;
+        ReadProcessMemory(hProcess, a, &v, 4, &r);
+        g_vsnap.writtenValues.push_back({a, v});
+    }
+ 
+    g_vsnap.taken = true;
+ 
+    char msg[256];
+    SYSTEMTIME& t = g_vsnap.snapshotTime;
+    sprintf_s(msg,
+        "Snapshot taken at %02d:%02d:%02d  |  "
+        "%zu module(s)  |  %zu thread(s)  |  %zu exec region(s)  |  %zu scan addr(s)",
+        t.wHour, t.wMinute, t.wSecond,
+        g_vsnap.modules.size(), g_vsnap.threadIds.size(),
+        g_vsnap.memRegions.size(), g_vsnap.writtenValues.size());
+    SetWindowTextA(hStaticSnapStatus, msg);
+    LogToStatus("Verification snapshot taken");
+}
+ 
+void VerifyCheckValues() {
+    VerifySep("VALUE READ-BACK  (scan results vs current memory)");
+    if (!hProcess) { AppendEditText(hLstVerify, "  Not attached."); return; }
+    if (scanResults.empty()) { AppendEditText(hLstVerify, "  No scan results to verify."); return; }
+ 
+    int dt = (int)SendMessage(hCmbDataType, CB_GETCURSEL, 0, 0);
+    char wantedStr[128] = {}; GetWindowTextA(hEditNewValue, wantedStr, 128);
+    LPVOID base = GetBaseAddress();
+ 
+    int matched = 0, total = 0;
+    for (LPVOID addr : scanResults) {
+        BYTE buf[16] = {}; SIZE_T r;
+        size_t sz = GetDataTypeSize(dt);
+        if (!ReadProcessMemory(hProcess, addr, buf, sz, &r) || r < sz) {
+            VerifyLine(false, "0x%p  read FAILED", addr);
+            total++; continue;
+        }
+        std::string curVal = FormatTypedValue(buf, dt);
+        LONGLONG off = base ? ((LONGLONG)(uintptr_t)addr - (LONGLONG)(uintptr_t)base) : 0;
+ 
+        bool match = false;
+        if (dt == DT_INT32 || dt == DT_INT16 || dt == DT_INT8 || dt == DT_INT64) {
+            BYTE wantBuf[16] = {};
+            if      (dt == DT_INT8)  { int8_t  v=(int8_t) atoi(wantedStr); memcpy(wantBuf,&v,1); }
+            else if (dt == DT_INT16) { int16_t v=(int16_t)atoi(wantedStr); memcpy(wantBuf,&v,2); }
+            else if (dt == DT_INT64) { int64_t v=_strtoi64(wantedStr,NULL,10); memcpy(wantBuf,&v,8); }
+            else                     { int32_t v=atoi(wantedStr); memcpy(wantBuf,&v,4); }
+            match = (memcmp(buf, wantBuf, sz) == 0);
+        } else if (dt == DT_FLOAT) {
+            float want=(float)atof(wantedStr), got=*(float*)buf;
+            match = fabsf(got - want) < 0.001f;
+        } else if (dt == DT_DOUBLE) {
+            double want=atof(wantedStr), got=*(double*)buf;
+            match = fabs(got - want) < 0.00001;
+        } else {
+            match = true; 
+        }
+ 
+        char line[512];
+        sprintf_s(line, "0x%p  +0x%llX  current=%-18s  wanted=%s",
+            addr, off, curVal.c_str(), wantedStr);
+        VerifyLine(match, "%s", line);
+        if (match) matched++;
+        total++;
+    }
+ 
+    char sum[128];
+    sprintf_s(sum, "  Result: %d / %d address(es) hold the expected value.", matched, total);
+    AppendEditText(hLstVerify, sum);
+}
+ 
+void VerifyCheckModules() {
+    VerifySep("MODULE DIFF  (new DLLs since snapshot)");
+    if (!hProcess) { AppendEditText(hLstVerify, "  Not attached."); return; }
+ 
+    HMODULE mods[1024]; DWORD needed = 0;
+    std::vector<std::string> current;
+    if (EnumProcessModules(hProcess, mods, sizeof(mods), &needed)) {
+        DWORD cnt = needed / sizeof(HMODULE);
+        for (DWORD i = 0; i < cnt; i++) {
+            char path[MAX_PATH] = {};
+            GetModuleFileNameExA(hProcess, mods[i], path, MAX_PATH);
+            MODULEINFO mi = {}; GetModuleInformation(hProcess, mods[i], &mi, sizeof(mi));
+            char rec[MAX_PATH + 64];
+            sprintf_s(rec, "0x%llX|%llu|%s",
+                (unsigned long long)(uintptr_t)mi.lpBaseOfDll,
+                (unsigned long long)mi.SizeOfImage, path);
+            current.push_back(rec);
+        }
+    }
+ 
+    if (!g_vsnap.taken) {
+        AppendEditText(hLstVerify, "  No snapshot – showing all current modules:");
+        for (auto& m : current) {
+            const char* name = strrchr(m.c_str(), '|');
+            VerifyLine(true, "%s", name ? name + 1 : m.c_str());
+        }
+        return;
+    }
+ 
+    int newMods = 0;
+    for (auto& cm : current) {
+        bool found = false;
+        for (auto& sm : g_vsnap.modules) if (sm == cm) { found = true; break; }
+        if (!found) {
+            const char* name = strrchr(cm.c_str(), '|');
+            char line[MAX_PATH + 64];
+            sprintf_s(line, "NEW  %s", name ? name + 1 : cm.c_str());
+            VerifyLine(true, "%s", line);
+            newMods++;
+        }
+    }
+ 
+    int removedMods = 0;
+    for (auto& sm : g_vsnap.modules) {
+        bool found = false;
+        for (auto& cm : current) if (cm == sm) { found = true; break; }
+        if (!found) {
+            const char* name = strrchr(sm.c_str(), '|');
+            char line[MAX_PATH + 64];
+            sprintf_s(line, "GONE  %s", name ? name + 1 : sm.c_str());
+            VerifyLine(false, "%s", line);
+            removedMods++;
+        }
+    }
+ 
+    if (newMods == 0 && removedMods == 0)
+        AppendEditText(hLstVerify, "  No module changes since snapshot.");
+    else {
+        char sum[128];
+        sprintf_s(sum, "  Result: %d new module(s), %d removed module(s).", newMods, removedMods);
+        AppendEditText(hLstVerify, sum);
+    }
+}
+ 
+void VerifyCheckThreads() {
+    VerifySep("THREAD DIFF  (new threads since snapshot)");
+    if (!currentPID) { AppendEditText(hLstVerify, "  Not attached."); return; }
+ 
+    typedef NTSTATUS(WINAPI* NtQIT)(HANDLE, int, PVOID, ULONG, PULONG);
+    static NtQIT fn = (NtQIT)GetProcAddress(GetModuleHandleA("ntdll.dll"),
+                                             "NtQueryInformationThread");
+ 
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        AppendEditText(hLstVerify, "  Snapshot failed."); return;
+    }
+ 
+    std::vector<DWORD> current;
+    THREADENTRY32 te; te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID == currentPID)
+                current.push_back(te.th32ThreadID);
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+ 
+    if (!g_vsnap.taken) {
+        char line[64]; sprintf_s(line, "  No snapshot – current thread count: %zu", current.size());
+        AppendEditText(hLstVerify, line);
+        return;
+    }
+ 
+    int newThreads = 0;
+    for (DWORD tid : current) {
+        bool found = false;
+        for (DWORD old : g_vsnap.threadIds) if (old == tid) { found = true; break; }
+        if (!found) {
+            PVOID sa = NULL;
+            HANDLE hTh = OpenThread(THREAD_QUERY_INFORMATION, FALSE, tid);
+            if (hTh) { if (fn) fn(hTh, 9, &sa, sizeof(sa), NULL); CloseHandle(hTh); }
+ 
+            MEMORY_BASIC_INFORMATION mbi = {}; const char* kind = "?";
+            if (sa && VirtualQueryEx(hProcess, sa, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+                if      (mbi.Type == MEM_PRIVATE) kind = "PRIVATE";
+                else if (mbi.Type == MEM_MAPPED)  kind = "MAPPED";
+                else if (mbi.Type == MEM_IMAGE)   kind = "IMAGE";
+            }
+            char line[256];
+            sprintf_s(line, "NEW  TID=%-10lu  start=0x%p  region=%s", tid, sa, kind);
+            bool suspicious = (mbi.Type == MEM_PRIVATE || mbi.Type == MEM_MAPPED);
+            VerifyLine(!suspicious, "%s", line);
+            newThreads++;
+        }
+    }
+ 
+    int goneThreads = 0;
+    for (DWORD old : g_vsnap.threadIds) {
+        bool found = false;
+        for (DWORD cur : current) if (cur == old) { found = true; break; }
+        if (!found) {
+            char line[64]; sprintf_s(line, "GONE  TID=%lu", old);
+            AppendEditText(hLstVerify, line);
+            goneThreads++;
+        }
+    }
+ 
+    if (newThreads == 0 && goneThreads == 0)
+        AppendEditText(hLstVerify, "  No thread changes since snapshot.");
+    else {
+        char sum[128];
+        sprintf_s(sum, "  Result: %d new thread(s), %d exited thread(s).", newThreads, goneThreads);
+        AppendEditText(hLstVerify, sum);
+    }
+}
+ 
+void VerifyCheckMemory() {
+    VerifySep("MEMORY REGION DIFF  (new executable allocations since snapshot)");
+    if (!hProcess) { AppendEditText(hLstVerify, "  Not attached."); return; }
+ 
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    LPVOID addr = si.lpMinimumApplicationAddress;
+    std::vector<VerifySnapshot::MemRec> current;
+    while (addr < si.lpMaximumApplicationAddress) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+            VerifySnapshot::MemRec r;
+            r.base = (uintptr_t)mbi.BaseAddress; r.size = mbi.RegionSize;
+            r.protect = mbi.Protect; r.type = mbi.Type;
+            current.push_back(r);
+        }
+        addr = (LPVOID)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
+    }
+ 
+    if (!g_vsnap.taken) {
+        char line[64];
+        sprintf_s(line, "  No snapshot – current exec region count: %zu", current.size());
+        AppendEditText(hLstVerify, line);
+        return;
+    }
+ 
+    int newRegs = 0;
+    for (auto& cr : current) {
+        bool found = false;
+        for (auto& sr : g_vsnap.memRegions)
+            if (sr.base == cr.base && sr.size == cr.size) { found = true; break; }
+        if (!found) {
+            const char* prot = "EXEC";
+            if     (cr.protect & PAGE_EXECUTE_READWRITE) prot = "RWX";
+            else if(cr.protect & PAGE_EXECUTE_READ)      prot = "RX";
+            const char* mtype = cr.type == MEM_PRIVATE ? "PRIVATE"
+                              : cr.type == MEM_MAPPED  ? "MAPPED" : "IMAGE";
+            char line[256];
+            sprintf_s(line, "NEW  0x%016llX  size=%s  prot=%-6s  type=%s",
+                (unsigned long long)cr.base,
+                FormatMemorySize(cr.size).c_str(), prot, mtype);
+            bool suspicious = (cr.type == MEM_PRIVATE) &&
+                               (cr.protect & PAGE_EXECUTE_READWRITE);
+            VerifyLine(!suspicious, "%s%s", line,
+                suspicious ? "  <-- shellcode buffer" : "");
+            newRegs++;
+        }
+    }
+ 
+    if (newRegs == 0)
+        AppendEditText(hLstVerify, "  No new executable regions since snapshot.");
+    else {
+        char sum[128];
+        sprintf_s(sum, "  Result: %d new executable region(s).", newRegs);
+        AppendEditText(hLstVerify, sum);
+    }
+}
+ 
+
+void VerifyCheckSentinel() {
+    VerifySep("SENTINEL / CANARY CHECK  (did shellcode reach this address?)");
+    if (!hProcess) { AppendEditText(hLstVerify, "  Not attached."); return; }
+    char addrStr[64] = {}, valStr[32] = {};
+    GetWindowTextA(hEditSentinelAddr, addrStr, 64);
+    GetWindowTextA(hEditSentinelVal, valStr, 32);
+    LPVOID addr = (LPVOID)(uintptr_t)strtoull(addrStr, nullptr, 0);
+    int want = atoi(valStr);
+    if (!addr || (uintptr_t)addr < 0x10000) {
+        AppendEditText(hLstVerify, "  Enter a valid sentinel address.");
+        return;
+    }
+    int cur = 0; SIZE_T r;
+    if (!ReadProcessMemory(hProcess, addr, &cur, 4, &r) || r < 4) {
+        VerifyLine(false, "0x%p  read FAILED (invalid/unreadable address)", addr);
+        return;
+    }
+    bool hit = (cur == want);
+    char line[256];
+    sprintf_s(line, "Sentinel @ 0x%p  read=%d  expected=%d", addr, cur, want);
+    VerifyLine(hit, "%s  -->  %s", line,
+        hit ? "value matches – shellcode did NOT change it (set a DIFFERENT value)"
+            : "value differs – shellcode REACHED and modified this address  ✓");
+    BYTE hex4[4]; ReadProcessMemory(hProcess, addr, hex4, 4, &r);
+    char hexline[64];
+    sprintf_s(hexline, "  Raw bytes: %02X %02X %02X %02X", hex4[0], hex4[1], hex4[2], hex4[3]);
+    AppendEditText(hLstVerify, hexline);
+}
+ 
+void RunVerifyAll() {
+    ClearEditText(hLstVerify);
+    SYSTEMTIME now; GetLocalTime(&now);
+    char hdr[256];
+    sprintf_s(hdr, "=== VERIFICATION REPORT  %02d:%02d:%02d  PID=%d ===",
+        now.wHour, now.wMinute, now.wSecond, currentPID);
+    AppendEditText(hLstVerify, hdr);
+    VerifyCheckValues();
+    VerifyCheckModules();
+    VerifyCheckThreads();
+    VerifyCheckMemory();
+    VerifyCheckSentinel();
+    AppendEditText(hLstVerify, "\r\n=== END OF REPORT ===");
+    LogToStatus("Verification complete – see Verify tab");
+}
+
+void LogToTrigger(const char* msg, bool error) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char buf[512];
+    sprintf_s(buf, "[%02d:%02d:%02d]  %s", st.wHour, st.wMinute, st.wSecond, msg);
+    AppendEditText(hLstTriggerLog, buf);
+    if (error) MessageBeep(MB_ICONERROR);
+}
+
+void TriggerShellcode() {
+    if (!hProcess || !currentPID) {
+        LogToTrigger("Not attached to a process", true);
+        return;
+    }
+
+    char addrStr[64] = { 0 };
+    GetWindowTextA(hEditTriggerAddr, addrStr, 64);
+    uintptr_t targetAddr = (uintptr_t)strtoull(addrStr, nullptr, 0);
+    if (!targetAddr) {
+        LogToTrigger("Invalid target address", true);
+        return;
+    }
+
+    int method = (int)SendMessage(hCmbTriggerMethod, CB_GETCURSEL, 0, 0);
+
+    if (method == 0) {
+        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+            (LPTHREAD_START_ROUTINE)targetAddr, NULL, 0, NULL);
+        if (hThread) {
+            DWORD tid = GetThreadId(hThread);  
+            g_lastCreatedThreadId = tid;
+            char msg[256];
+            sprintf_s(msg, "CreateRemoteThread at 0x%llX succeeded (thread handle %p, TID=%lu)",
+                (unsigned long long)targetAddr, hThread, tid);
+            LogToTrigger(msg);
+            char tidStr[16];
+            sprintf_s(tidStr, "%lu", tid);
+            SetWindowTextA(hEditApcTid, tidStr);
+            CloseHandle(hThread);
+        } else {
+            char msg[256];
+            sprintf_s(msg, "CreateRemoteThread failed, error %lu", GetLastError());
+            LogToTrigger(msg, true);
+        }
+    }
+    else if (method == 1) {
+        char tidStr[32] = { 0 };
+        GetWindowTextA(hEditApcTid, tidStr, 32);
+        DWORD tid = (DWORD)strtoul(tidStr, nullptr, 0);
+        if (!tid) {
+            LogToTrigger("Invalid thread ID for APC", true);
+            return;
+        }
+        HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, tid);
+        if (!hThread) {
+            char msg[256];
+            sprintf_s(msg, "OpenThread(%lu) failed, error %lu", tid, GetLastError());
+            LogToTrigger(msg, true);
+            return;
+        }
+        if (QueueUserAPC((PAPCFUNC)targetAddr, hThread, 0)) {
+            char msg[256];
+            sprintf_s(msg, "APC queued to TID %lu (address 0x%llX)", tid, (unsigned long long)targetAddr);
+            LogToTrigger(msg);
+        } else {
+            char msg[256];
+            sprintf_s(msg, "QueueUserAPC failed, error %lu", GetLastError());
+            LogToTrigger(msg, true);
+        }
+        CloseHandle(hThread);
+    }
+    else if (method == 2) {
+        char dllPath[MAX_PATH] = { 0 };
+        GetWindowTextA(hEditScDllPath, dllPath, MAX_PATH);
+        if (!dllPath[0]) {
+            LogToTrigger("No DLL path specified (use Shellcode Exec tab to set DLL path)", true);
+            return;
+        }
+        char funcName[256] = { 0 };
+        GetWindowTextA(hEditScExportFunc, funcName, 256);
+        if (!funcName[0]) {
+            LogToTrigger("No export function name specified", true);
+            return;
+        }
+
+        LPVOID pRemotePath = VirtualAllocEx(hProcess, NULL, strlen(dllPath) + 1,
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!pRemotePath) {
+            LogToTrigger("VirtualAllocEx for DLL path failed", true);
+            return;
+        }
+        SIZE_T written = 0;
+        if (!WriteProcessMemory(hProcess, pRemotePath, dllPath, strlen(dllPath) + 1, &written)) {
+            VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+            LogToTrigger("WriteProcessMemory for DLL path failed", true);
+            return;
+        }
+        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+            (LPTHREAD_START_ROUTINE)LoadLibraryA, pRemotePath, 0, NULL);
+        if (!hThread) {
+            VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+            LogToTrigger("CreateRemoteThread (LoadLibrary) failed", true);
+            return;
+        }
+        WaitForSingleObject(hThread, 10000);
+        DWORD hMod = 0;
+        GetExitCodeThread(hThread, &hMod);
+        CloseHandle(hThread);
+        VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
+        if (!hMod) {
+            LogToTrigger("LoadLibrary failed – DLL not loaded (wrong architecture?)", true);
+            return;
+        }
+
+        HMODULE remoteBase = FindModuleByPath(currentPID, dllPath);
+        if (!remoteBase) {
+            LogToTrigger("DLL loaded but cannot find its base address", true);
+            return;
+        }
+
+        DWORD rva = GetExportRVA(dllPath, funcName);
+        if (rva == 0) {
+            char err[256];
+            sprintf_s(err, "Export '%s' not found in DLL", funcName);
+            LogToTrigger(err, true);
+            return;
+        }
+
+        LPVOID remoteFunc = (LPVOID)((uintptr_t)remoteBase + rva);
+        HANDLE hCall = CreateRemoteThread(hProcess, NULL, 0,
+            (LPTHREAD_START_ROUTINE)remoteFunc, NULL, 0, NULL);
+        if (hCall) {
+            char msg[512];
+            sprintf_s(msg, "DLL export '%s' executed at 0x%p (DLL base 0x%p)",
+                funcName, remoteFunc, remoteBase);
+            LogToTrigger(msg);
+            CloseHandle(hCall);
+            PopulateModuleList();
+        } else {
+            char msg[256];
+            sprintf_s(msg, "CreateRemoteThread for export failed, error %lu", GetLastError());
+            LogToTrigger(msg, true);
+        }
+    }
+}
 
 static void EnableDebugPrivilege() {
     HANDLE hToken;
@@ -401,6 +1200,7 @@ void SetEditText(HWND hEdit, const char* text) {
     SendMessage(hEdit, EM_SETSEL, 0, 0);
     SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
 }
+
 
 void ClearEditText(HWND hEdit) { SetWindowTextA(hEdit,""); }
 
@@ -1866,29 +2666,31 @@ static void ParseAndSelectAddressFromLine(HWND hEdit){
     if(!fa||fa<=(uintptr_t)0x10000)return;
     for(size_t i=0;i<scanResults.size();i++){
         if((uintptr_t)scanResults[i]==fa){
-            selectedAddress=scanResults[i];
-            int curVal=ReadValueFromAddress(selectedAddress);
+            SetSelectedAddress(scanResults[i]);
+            LPVOID addr = GetSelectedAddress();
+            int curVal=ReadValueFromAddress(addr);
             SetWindowTextA(hEditNewValue,std::to_string(curVal).c_str());
             LPVOID base=GetBaseAddress();
-            LONGLONG off=base?((LONGLONG)(uintptr_t)selectedAddress-(LONGLONG)(uintptr_t)base):0;
+            LONGLONG off=base?((LONGLONG)(uintptr_t)addr-(LONGLONG)(uintptr_t)base):0;
             char info[512];
-            sprintf_s(info,"Selected: 0x%p  |  Offset: +0x%llX  |  int32: %d",selectedAddress,off,curVal);
+            sprintf_s(info,"Selected: 0x%p  |  Offset: +0x%llX  |  int32: %d",addr,off,curVal);
             SetWindowTextA(hStaticAddressInfo,info);
             char offStr[32];sprintf_s(offStr,"0x%llX",off);
             SetWindowTextA(hEditTrackedOffset,offStr);
-            char addrHex[32];sprintf_s(addrHex,"0x%llX",(uintptr_t)selectedAddress);
+            char addrHex[32];sprintf_s(addrHex,"0x%llX",(uintptr_t)addr);
             SetWindowTextA(hEditScAddr,addrHex);
             EnableWindow(hBtnWrite,TRUE);EnableWindow(hBtnUndo,TRUE);
-            ShowHexAtAddress(selectedAddress,selectedAddress);
+            ShowHexAtAddress(addr,addr);
             return;
         }
     }
-    selectedAddress=(LPVOID)fa;
-    char info[256];sprintf_s(info,"Selected (manual): 0x%llX",(unsigned long long)fa);
+    SetSelectedAddress((LPVOID)fa);
+    LPVOID addr = GetSelectedAddress();
+    char info[256];sprintf_s(info,"Selected (manual): 0x%llX",(unsigned long long)(uintptr_t)addr);
     SetWindowTextA(hStaticAddressInfo,info);
-    char addrHex[32];sprintf_s(addrHex,"0x%llX",fa);
+    char addrHex[32];sprintf_s(addrHex,"0x%llX",(uintptr_t)addr);
     SetWindowTextA(hEditScAddr,addrHex);
-    ShowHexAtAddress((LPVOID)fa,(LPVOID)fa);
+    ShowHexAtAddress(addr,addr);
 }
 
 LRESULT CALLBACK ScanEditSubclassProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
@@ -2577,6 +3379,1265 @@ static DWORD GetExportRVA(const char* dllPath, const char* funcName) {
     return rva;
 }
 
+static int DisasmOne(const BYTE* b, size_t left, uint64_t rva, char* out, size_t outSz) {
+    if (left == 0 || !out || outSz < 2) return 0;
+
+    static ZydisDecoder   s_decoder;
+    static ZydisFormatter s_formatter;
+    static bool           s_init = false;
+    if (!s_init) {
+        if (!ZYAN_SUCCESS(ZydisDecoderInit(&s_decoder,
+                ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+            sprintf_s(out, outSz, "db 0x%02X", b[0]);
+            return 1;
+        }
+        if (!ZYAN_SUCCESS(ZydisFormatterInit(&s_formatter,
+                ZYDIS_FORMATTER_STYLE_INTEL))) {
+            sprintf_s(out, outSz, "db 0x%02X", b[0]);
+            return 1;
+        }
+
+        ZyanU64 enable = ZYAN_TRUE;
+        ZydisFormatterSetProperty(&s_formatter,
+            ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_BRANCHES, ZYAN_FALSE);
+        ZydisFormatterSetProperty(&s_formatter,
+            ZYDIS_FORMATTER_PROP_HEX_UPPERCASE, enable);
+        s_init = true;
+    }
+
+    ZydisDecodedInstruction ins;
+    ZydisDecodedOperand     ops[ZYDIS_MAX_OPERAND_COUNT];
+    ZyanStatus st = ZydisDecoderDecodeFull(&s_decoder, b, left, &ins, ops);
+    if (!ZYAN_SUCCESS(st)) {
+        sprintf_s(out, outSz, "db 0x%02X", b[0]);
+        return 1;
+    }
+    if (!ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&s_formatter, &ins, ops,
+            ins.operand_count_visible, out, outSz, rva, ZYAN_NULL))) {
+        sprintf_s(out, outSz, "db 0x%02X", b[0]);
+        return 1;
+    }
+    return (int)ins.length;
+}
+
+struct ScPattern {
+    const char* name;
+    const char* desc;
+    std::vector<BYTE> bytes;
+    std::vector<bool> mask;  
+};
+
+static std::vector<ScPattern> BuildPatterns() {
+    std::vector<ScPattern> p;
+    p.push_back({"PEB_WALK_GS60","mov rax/rcx, gs:[0x60]  (PEB base via TEB)",
+        {0x65,0x48,0x8B,0x04,0x25,0x60,0x00,0x00,0x00},{false,false,false,false,false,false,false,false,false}});
+    p.push_back({"SYSCALL","Raw syscall instruction  (direct kernel call)",
+        {0x0F,0x05},{false,false}});
+    p.push_back({"SYSCALL_MOV_EAX","mov eax, imm32 + syscall  (syscall stub)",
+        {0xB8,0x00,0x00,0x00,0x00,0x0F,0x05},{false,true,true,true,true,false,false}});
+    p.push_back({"PUSH_PAGE_RWX","push 0x40  (PAGE_EXECUTE_READWRITE flag)",
+        {0x6A,0x40},{false,false}});
+    p.push_back({"PUSH_MEM_COMMIT","push 0x1000  (MEM_COMMIT flag)",
+        {0x68,0x00,0x10,0x00,0x00},{false,false,false,false,false}});
+    p.push_back({"CALL_RAX","call rax  (API dispatch via register)",
+        {0xFF,0xD0},{false,false}});
+    p.push_back({"JMP_RAX","jmp rax",
+        {0xFF,0xE0},{false,false}});
+    p.push_back({"XOR_DECODE","xor [rsi+rbx], al  (XOR decode loop)",
+        {0x30,0x04,0x1E},{false,false,false}});
+    p.push_back({"INT3","int3  (breakpoint / possible padding)",
+        {0xCC},{false}});
+    p.push_back({"STACK_STRING","Stack string construction pattern",
+        {0x48,0xB8},{false,false}});  
+    p.push_back({"ROR13_HASH","ror ?, 13  (ROR13 API hashing)",
+        {0xC1,0x00,0x0D},{false,true,false}}); 
+    p.push_back({"SHADOW_SPACE","sub rsp, 0x28  (shadow space allocation)",
+        {0x48,0x83,0xEC,0x28},{false,false,false,false}});
+    p.push_back({"SHADOW_SPACE_38","sub rsp, 0x38  (shadow space allocation)",
+        {0x48,0x83,0xEC,0x38},{false,false,false,false}});
+    return p;
+}
+
+void AnalyzeDumpShellcode() {
+    int len = GetWindowTextLengthA(hEditDump);
+    if (len <= 0) { LogToStatus("Dump panel is empty - run Dump Selected first", true); return; }
+    std::string raw(len+1, '\0');
+    GetWindowTextA(hEditDump, &raw[0], len+1);
+
+    std::vector<BYTE> bytes;
+    uint64_t baseAddr = 0;
+    {
+        const char* p = raw.c_str();
+        uint64_t firstAddr = strtoull(p, nullptr, 16);
+        if (firstAddr) baseAddr = firstAddr;
+        while (*p) {
+            const char* colon = strchr(p, ':');
+            if (!colon) { p += strlen(p); break; }
+            p = colon + 1;
+            for (int i = 0; i < 16; i++) {
+                while (*p == ' ') p++;
+                if (*p == '\0' || *p == '\r' || *p == '\n' || *p == '|') break;
+                char* end = nullptr;
+                unsigned long v = strtoul(p, &end, 16);
+                if (end == p || end - p > 2) break;
+                bytes.push_back((BYTE)v);
+                p = end;
+            }
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') p++;
+        }
+    }
+
+    if (bytes.empty()) {
+        LogToStatus("Could not parse hex bytes from dump. Use 'Dump Selected' first.", true);
+        return;
+    }
+
+    ClearEditText(hEditDump);
+    char hdr[256];
+    sprintf_s(hdr, "=== SHELLCODE ANALYSIS  |  %zu bytes @ 0x%llX ===",
+        bytes.size(), (unsigned long long)baseAddr);
+    AppendEditText(hEditDump, hdr);
+    AppendEditText(hEditDump, "");
+
+    AppendEditText(hEditDump, "--- PATTERN SIGNATURES ---");
+    auto patterns = BuildPatterns();
+    int sigHits = 0;
+    for (auto& pat : patterns) {
+        size_t plen = pat.bytes.size();
+        for (size_t i = 0; i + plen <= bytes.size(); i++) {
+            bool match = true;
+            for (size_t k = 0; k < plen; k++) {
+                if (!pat.mask[k] && bytes[i+k] != pat.bytes[k]) { match = false; break; }
+            }
+            if (match) {
+                char line[256];
+                sprintf_s(line, "  [+0x%03zX]  %-24s  %s", i, pat.name, pat.desc);
+                AppendEditText(hEditDump, line);
+                sigHits++;
+            }
+        }
+    }
+    if (sigHits == 0) AppendEditText(hEditDump, "  (no known signatures found)");
+
+    AppendEditText(hEditDump, "");
+    AppendEditText(hEditDump, "--- ENTROPY / STATISTICS ---");
+    {
+        int freq[256] = {};
+        for (BYTE b : bytes) freq[b]++;
+        double ent = 0.0;
+        for (int i = 0; i < 256; i++) {
+            if (freq[i] == 0) continue;
+            double p = (double)freq[i] / bytes.size();
+            ent -= p * log(p) / log(2.0);
+        }
+        int zeros = freq[0], nops = freq[0x90], rets = freq[0xC3];
+        int printable = 0;
+        for (BYTE b : bytes) if (b >= 0x20 && b < 0x7F) printable++;
+        char line[256];
+        sprintf_s(line, "  Size: %zu bytes  |  Entropy: %.2f bits  |  Zeros: %d  |  NOPs: %d  |  RETs: %d  |  Printable: %d%%",
+            bytes.size(), ent, zeros, nops, rets, (int)(100.0*printable/bytes.size()));
+        AppendEditText(hEditDump, line);
+        if (ent > 7.0)  AppendEditText(hEditDump, "  [!!] HIGH ENTROPY - possibly encoded/encrypted payload");
+        if (ent < 3.5 && bytes.size() > 32)
+                        AppendEditText(hEditDump, "  [  ] LOW ENTROPY  - mostly NOP/zero padding or simple stub");
+        if ((double)printable / bytes.size() > 0.75)
+                        AppendEditText(hEditDump, "  [!!] HIGH printable ratio - may be string data or ASCII shellcode");
+    }
+
+    AppendEditText(hEditDump, "");
+    AppendEditText(hEditDump, "--- EMBEDDED STRINGS (ASCII >= 5 chars) ---");
+    {
+        std::string cur;
+        int strCount = 0;
+        for (size_t i = 0; i <= bytes.size(); i++) {
+            BYTE b = (i < bytes.size()) ? bytes[i] : 0;
+            if (b >= 0x20 && b < 0x7F) {
+                cur += (char)b;
+            } else {
+                if (cur.size() >= 5) {
+                    char line[512];
+                    sprintf_s(line, "  [+0x%03zX]  \"%s\"", i - cur.size(), cur.c_str());
+                    AppendEditText(hEditDump, line);
+                    strCount++;
+                }
+                cur.clear();
+            }
+        }
+        if (strCount == 0) AppendEditText(hEditDump, "  (none found)");
+    }
+
+    AppendEditText(hEditDump, "");
+    AppendEditText(hEditDump, "--- EMBEDDED STRINGS (UTF-16LE >= 5 chars) ---");
+    {
+        int strCount = 0;
+        for (size_t i = 0; i + 1 < bytes.size(); ) {
+            wchar_t wc = *(wchar_t*)&bytes[i];
+            if (wc >= 0x20 && wc < 0x7F) {
+                std::string cur;
+                size_t start = i;
+                while (i + 1 < bytes.size()) {
+                    wchar_t w = *(wchar_t*)&bytes[i];
+                    if (w < 0x20 || w >= 0x7F) break;
+                    cur += (char)w;
+                    i += 2;
+                }
+                if (cur.size() >= 5) {
+                    char line[512];
+                    sprintf_s(line, "  [+0x%03zX]  L\"%s\"", start, cur.c_str());
+                    AppendEditText(hEditDump, line);
+                    strCount++;
+                }
+            } else { i++; }
+        }
+        if (strCount == 0) AppendEditText(hEditDump, "  (none found)");
+    }
+
+    AppendEditText(hEditDump, "");
+    AppendEditText(hEditDump, "--- DISASSEMBLY (x64) ---");
+    AppendEditText(hEditDump, "  Offset  | Address            | Bytes                     | Instruction");
+    AppendEditText(hEditDump, "  --------+--------------------+---------------------------+---------------------------");
+    {
+        size_t pos = 0;
+        int instrCount = 0;
+        int maxInstr = 512;
+        while (pos < bytes.size() && instrCount < maxInstr) {
+            char instr[256] = {};
+            size_t left = bytes.size() - pos;
+            uint64_t rva = baseAddr + pos;
+            int consumed = DisasmOne(bytes.data() + pos, left, rva, instr, sizeof(instr));
+            if (consumed <= 0) consumed = 1;
+
+            char hexcol[48] = {};
+            int hpos = 0;
+            for (int i = 0; i < consumed && i < 8; i++) {
+                sprintf_s(hexcol + hpos, sizeof(hexcol) - hpos, "%02X ", bytes[pos+i]);
+                hpos += 3;
+            }
+            if (consumed > 8) strcat_s(hexcol, "...");
+
+            const char* flag = "";
+            if (strstr(instr,"syscall"))     flag = "  <--- SYSCALL";
+            else if (strstr(instr,"int3"))   flag = "  <--- BREAKPOINT";
+            else if (strstr(instr,"gs:"))    flag = "  <--- TEB/PEB ACCESS";
+            else if (strstr(instr,"call"))   flag = "  <--- CALL";
+            else if (strstr(instr,"0x40"))   flag = "  (PAGE_RWX?)";
+
+            char line[512];
+            sprintf_s(line, "  +0x%04zX | 0x%016llX | %-27s| %s%s",
+                pos, (unsigned long long)rva, hexcol, instr, flag);
+            AppendEditText(hEditDump, line);
+
+            pos += consumed;
+            instrCount++;
+        }
+        if (pos < bytes.size()) {
+            char more[64];
+            sprintf_s(more, "  ... (%zu bytes remaining, limit %d instrs)", bytes.size()-pos, maxInstr);
+            AppendEditText(hEditDump, more);
+        }
+    }
+
+    AppendEditText(hEditDump, "");
+    AppendEditText(hEditDump, "=== END OF ANALYSIS ===");
+    char done[128];
+    sprintf_s(done, "Shellcode analysis complete: %zu bytes, %d signature(s) found", bytes.size(), sigHits);
+    LogToStatus(done);
+}
+
+
+
+LPVOID ResolveChain(const PointerChain& c, bool& ok) {
+    ok = false;
+    if (!hProcess) return nullptr;
+    uintptr_t modBase = 0;
+    if (c.moduleName.empty()) {
+        modBase = (uintptr_t)GetBaseAddress();
+    } else {
+        HMODULE mods[1024]; DWORD needed = 0;
+        if (!EnumProcessModules(hProcess, mods, sizeof(mods), &needed)) return nullptr;
+        DWORD cnt = needed / sizeof(HMODULE);
+        for (DWORD i = 0; i < cnt; i++) {
+            char path[MAX_PATH] = {};
+            if (!GetModuleFileNameExA(hProcess, mods[i], path, MAX_PATH)) continue;
+            const char* nm = strrchr(path, '\\'); nm = nm ? nm + 1 : path;
+            if (_stricmp(nm, c.moduleName.c_str()) == 0) {
+                modBase = (uintptr_t)mods[i];
+                break;
+            }
+        }
+    }
+    if (!modBase) return nullptr;
+    uintptr_t cur = modBase + c.baseOffset;
+    for (size_t i = 0; i < c.offsets.size(); i++) {
+        uintptr_t ptr = 0;
+        SIZE_T r = 0;
+        if (!ReadProcessMemory(hProcess, (LPCVOID)cur, &ptr, sizeof(ptr), &r) || r != sizeof(ptr))
+            return nullptr;
+        cur = ptr + c.offsets[i];
+    }
+    ok = true;
+    return (LPVOID)cur;
+}
+
+void RefreshChainsUI() {
+    if (!hLstChains) return;
+    ClearEditText(hLstChains);
+    AppendEditText(hLstChains, "Idx  Name                     Module           Base+Offset       Chain                          Resolved             Value");
+    AppendEditText(hLstChains, "-----+------------------------+----------------+------------------+-------------------------------+---------------------+--------");
+    for (int i = 0; i < (int)g_chains.size(); i++) {
+        PointerChain& c = g_chains[i];
+        bool ok = false;
+        LPVOID resolved = ResolveChain(c, ok);
+        c.lastResolved = (uintptr_t)resolved;
+        c.lastOk = ok;
+        c.lastValue = 0;
+        if (ok && resolved && hProcess) {
+            SIZE_T r; ReadProcessMemory(hProcess, resolved, &c.lastValue, 4, &r);
+        }
+        std::string offStr;
+        for (size_t k = 0; k < c.offsets.size(); k++) {
+            char b[32]; sprintf_s(b, k ? ",+0x%llX" : "+0x%llX", (unsigned long long)c.offsets[k]);
+            offStr += b;
+        }
+        if (offStr.empty()) offStr = "(direct)";
+        char line[768];
+        if (ok && resolved) {
+            sprintf_s(line, "[%2d] %-24s %-16s 0x%-16llX %-31s 0x%016llX  %d",
+                i, c.name.c_str(),
+                c.moduleName.empty() ? "(main)" : c.moduleName.c_str(),
+                (unsigned long long)c.baseOffset, offStr.c_str(),
+                (unsigned long long)(uintptr_t)resolved, c.lastValue);
+        } else {
+            sprintf_s(line, "[%2d] %-24s %-16s 0x%-16llX %-31s (unresolved)",
+                i, c.name.c_str(),
+                c.moduleName.empty() ? "(main)" : c.moduleName.c_str(),
+                (unsigned long long)c.baseOffset, offStr.c_str());
+        }
+        AppendEditText(hLstChains, line);
+    }
+}
+
+void AddChainFromUI() {
+    char name[128] = {}, mod[128] = {}, base[64] = {}, offs[512] = {};
+    GetWindowTextA(hEditChainName, name, sizeof(name));
+    GetWindowTextA(hEditChainMod,  mod,  sizeof(mod));
+    GetWindowTextA(hEditChainBase, base, sizeof(base));
+    GetWindowTextA(hEditChainOffs, offs, sizeof(offs));
+    if (!name[0]) { LogToStatus("Enter a chain name first", true); return; }
+    PointerChain c;
+    c.name = name;
+    c.moduleName = mod;
+    c.baseOffset = strtoull(base, nullptr, 0);
+    char* save = nullptr;
+    char* tok = strtok_s(offs, ",;", &save);
+    while (tok) {
+        while (*tok == ' ') tok++;
+        if (*tok) c.offsets.push_back((intptr_t)strtoll(tok, nullptr, 0));
+        tok = strtok_s(nullptr, ",;", &save);
+    }
+    g_chains.push_back(c);
+    RefreshChainsUI();
+    LogToStatus("Pointer chain added");
+}
+
+void DeleteSelectedChain() {
+    DWORD sel = 0;
+    SendMessage(hLstChains, EM_GETSEL, (WPARAM)&sel, 0);
+    int li = (int)SendMessage(hLstChains, EM_LINEFROMCHAR, (WPARAM)sel, 0);
+    int idx = li - 2; 
+    if (idx < 0 || idx >= (int)g_chains.size()) { LogToStatus("Click a chain line first", true); return; }
+    g_chains.erase(g_chains.begin() + idx);
+    RefreshChainsUI();
+    LogToStatus("Chain deleted");
+}
+
+void ResolveChainToSelected() {
+    DWORD sel = 0;
+    SendMessage(hLstChains, EM_GETSEL, (WPARAM)&sel, 0);
+    int li = (int)SendMessage(hLstChains, EM_LINEFROMCHAR, (WPARAM)sel, 0);
+    int idx = li - 2;
+    if (idx < 0 || idx >= (int)g_chains.size()) { LogToStatus("Click a chain line first", true); return; }
+    bool ok = false;
+    LPVOID a = ResolveChain(g_chains[idx], ok);
+    if (!ok || !a) { LogToStatus("Chain unresolved (bad ptr or process not attached)", true); return; }
+    SetSelectedAddress(a);
+    int v = ReadValueFromAddress(a);
+    char info[256];
+    sprintf_s(info, "Selected (chain '%s'): 0x%p  =  %d", g_chains[idx].name.c_str(), a, v);
+    SetWindowTextA(hStaticAddressInfo, info);
+    char hex[32]; sprintf_s(hex, "0x%llX", (uintptr_t)a);
+    SetWindowTextA(hEditScAddr, hex);
+    SetWindowTextA(hEditNewValue, std::to_string(v).c_str());
+    ShowHexAtAddress(a, a);
+    EnableWindow(hBtnWrite, TRUE); EnableWindow(hBtnUndo, TRUE);
+}
+
+void SaveChainsToFile() {
+    FILE* f = nullptr; fopen_s(&f, "memiscani_chains.txt", "w");
+    if (!f) { LogToStatus("Could not open memiscani_chains.txt for writing", true); return; }
+    fprintf(f, "# memiscani pointer chains v1\n");
+    fprintf(f, "# Format: name|module|baseOffsetHex|off1,off2,...\n");
+    for (auto& c : g_chains) {
+        fprintf(f, "%s|%s|%llx|", c.name.c_str(), c.moduleName.c_str(),
+            (unsigned long long)c.baseOffset);
+        for (size_t k = 0; k < c.offsets.size(); k++) {
+            fprintf(f, "%s%llx", k ? "," : "", (unsigned long long)c.offsets[k]);
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    char msg[128]; sprintf_s(msg, "Saved %zu chain(s) to memiscani_chains.txt", g_chains.size());
+    LogToStatus(msg);
+}
+
+void LoadChainsFromFile() {
+    FILE* f = nullptr; fopen_s(&f, "memiscani_chains.txt", "r");
+    if (!f) { LogToStatus("memiscani_chains.txt not found", true); return; }
+    g_chains.clear();
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == 0) continue;
+        for (char* p = line; *p; p++) if (*p == '\n' || *p == '\r') { *p = 0; break; }
+        char* parts[4] = {};
+        int n = 0;
+        char* p = line;
+        parts[n++] = p;
+        while (*p && n < 4) {
+            if (*p == '|') { *p = 0; p++; if (n < 4) parts[n++] = p; }
+            else p++;
+        }
+        if (n < 3) continue;
+        PointerChain c;
+        c.name = parts[0] ? parts[0] : "";
+        c.moduleName = parts[1] ? parts[1] : "";
+        c.baseOffset = parts[2] ? strtoull(parts[2], nullptr, 16) : 0;
+        if (n == 4 && parts[3] && *parts[3]) {
+            char* save = nullptr;
+            char* tok = strtok_s(parts[3], ",", &save);
+            while (tok) {
+                c.offsets.push_back((intptr_t)strtoll(tok, nullptr, 16));
+                tok = strtok_s(nullptr, ",", &save);
+            }
+        }
+        g_chains.push_back(c);
+    }
+    fclose(f);
+    char msg[128]; sprintf_s(msg, "Loaded %zu chain(s) from memiscani_chains.txt", g_chains.size());
+    LogToStatus(msg);
+    RefreshChainsUI();
+}
+
+void TraceCallGraph() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    char addrStr[64] = {}, depthStr[16] = {};
+    GetWindowTextA(hEditCgAddr,  addrStr,  sizeof(addrStr));
+    GetWindowTextA(hEditCgDepth, depthStr, sizeof(depthStr));
+    uintptr_t startAddr = strtoull(addrStr, nullptr, 0);
+    int maxDepth = atoi(depthStr); if (maxDepth <= 0) maxDepth = 3;
+    if (maxDepth > 8) maxDepth = 8;
+    if (!startAddr) { LogToStatus("Enter a starting address", true); return; }
+
+    ClearEditText(hLstCallGraph);
+    char hdr[256];
+    sprintf_s(hdr, "=== Call graph from 0x%llX  depth=%d ===",
+        (unsigned long long)startAddr, maxDepth);
+    AppendEditText(hLstCallGraph, hdr);
+    AppendEditText(hLstCallGraph, "  -> = direct call (E8 rel32)    => = direct jmp (E9 rel32)");
+    AppendEditText(hLstCallGraph, "");
+
+    struct Frame { uintptr_t addr; int depth; };
+    std::vector<Frame> stack;
+    std::set<uintptr_t> visited;
+    stack.push_back({startAddr, 0});
+    int totalCalls = 0;
+    int maxFunctions = 200;
+
+    while (!stack.empty() && (int)visited.size() < maxFunctions) {
+        Frame fr = stack.back(); stack.pop_back();
+        if (visited.count(fr.addr)) continue;
+        visited.insert(fr.addr);
+
+        BYTE buf[4096];
+        SIZE_T r = 0;
+        if (!ReadProcessMemory(hProcess, (LPCVOID)fr.addr, buf, sizeof(buf), &r) || r < 4)
+            continue;
+
+        char indent[64] = "";
+        int ind = fr.depth * 2; if (ind > 60) ind = 60;
+        for (int k = 0; k < ind; k++) indent[k] = ' ';
+        indent[ind] = 0;
+
+        char line[256];
+        sprintf_s(line, "%s+- FUNC 0x%llX", indent, (unsigned long long)fr.addr);
+        AppendEditText(hLstCallGraph, line);
+
+        size_t pos = 0;
+        int instrCount = 0;
+        int maxInstrPerFn = 400;
+        while (pos < r && instrCount < maxInstrPerFn) {
+            char instr[256] = {};
+            int consumed = DisasmOne(buf + pos, r - pos, fr.addr + pos, instr, sizeof(instr));
+            if (consumed <= 0) consumed = 1;
+            if (strncmp(instr, "ret", 3) == 0) break;
+
+            uintptr_t target = 0;
+            const char* edge = nullptr;
+            if (buf[pos] == 0xE8 && pos + 5 <= r) {
+                int32_t rel = *(int32_t*)(buf + pos + 1);
+                target = fr.addr + pos + 5 + rel;
+                edge = "->";
+            } else if (buf[pos] == 0xE9 && pos + 5 <= r) {
+                int32_t rel = *(int32_t*)(buf + pos + 1);
+                target = fr.addr + pos + 5 + rel;
+                edge = "=>";
+            }
+
+            if (edge && target) {
+                char callLine[320];
+                if (visited.count(target)) {
+                    sprintf_s(callLine, "%s   %s 0x%llX  (already visited)",
+                        indent, edge, (unsigned long long)target);
+                } else {
+                    sprintf_s(callLine, "%s   %s 0x%llX",
+                        indent, edge, (unsigned long long)target);
+                    if (fr.depth + 1 < maxDepth) {
+                        stack.push_back({target, fr.depth + 1});
+                    }
+                }
+                AppendEditText(hLstCallGraph, callLine);
+                totalCalls++;
+            }
+            pos += consumed;
+            instrCount++;
+        }
+    }
+
+    char done[160];
+    sprintf_s(done, "Call graph done: %zu unique function(s), %d edge(s) traced",
+        visited.size(), totalCalls);
+    AppendEditText(hLstCallGraph, "");
+    AppendEditText(hLstCallGraph, done);
+    LogToStatus(done);
+}
+
+
+void InstallTrampolineHook() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    char addrStr[64] = {}, scStr[8192] = {};
+    GetWindowTextA(hEditHookAddr, addrStr, sizeof(addrStr));
+    GetWindowTextA(hEditHookSc,   scStr,   sizeof(scStr));
+    LPVOID target = (LPVOID)strtoull(addrStr, nullptr, 0);
+    if (!target) { LogToStatus("Enter target address (hex 0x...)", true); return; }
+
+    std::vector<BYTE> userSc; std::vector<bool> userMask;
+    if (!ParseAOB(scStr, userSc, userMask) || userSc.empty()) {
+        LogToStatus("Enter shellcode bytes (e.g. 48 31 C0 90 90)", true);
+        return;
+    }
+
+    SIZE_T patchSize = 14;  
+    SIZE_T jmpBackSize = 14;
+
+    std::vector<BYTE> orig(patchSize);
+    SIZE_T r = 0;
+    if (!ReadProcessMemory(hProcess, target, orig.data(), patchSize, &r) || r != patchSize) {
+        LogToStatus("Failed to read original bytes at target", true); return;
+    }
+
+    SIZE_T trampSize = userSc.size() + patchSize + jmpBackSize;
+    LPVOID tramp = VirtualAllocEx(hProcess, nullptr, trampSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) { LogToStatus("VirtualAllocEx (trampoline) failed", true); return; }
+
+    std::vector<BYTE> trampBuf(trampSize);
+    memcpy(trampBuf.data(), userSc.data(), userSc.size());
+    memcpy(trampBuf.data() + userSc.size(), orig.data(), patchSize);
+
+    uintptr_t backAddr = (uintptr_t)target + patchSize;
+    BYTE* jmpBack = trampBuf.data() + userSc.size() + patchSize;
+    jmpBack[0] = 0xFF; jmpBack[1] = 0x25;
+    jmpBack[2] = jmpBack[3] = jmpBack[4] = jmpBack[5] = 0;
+    memcpy(jmpBack + 6, &backAddr, 8);
+
+    SIZE_T w;
+    if (!WriteProcessMemory(hProcess, tramp, trampBuf.data(), trampSize, &w)) {
+        VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+        LogToStatus("Failed to write trampoline", true); return;
+    }
+
+    std::vector<BYTE> patch(patchSize);
+    uintptr_t trampU = (uintptr_t)tramp;
+    patch[0] = 0xFF; patch[1] = 0x25;
+    patch[2] = patch[3] = patch[4] = patch[5] = 0;
+    memcpy(patch.data() + 6, &trampU, 8);
+
+    DWORD oldProt = 0;
+    if (!VirtualProtectEx(hProcess, target, patchSize, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+        LogToStatus("VirtualProtectEx failed on target", true); return;
+    }
+    if (!WriteProcessMemory(hProcess, target, patch.data(), patchSize, &w)) {
+        VirtualProtectEx(hProcess, target, patchSize, oldProt, &oldProt);
+        VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+        LogToStatus("Failed to patch target with JMP", true); return;
+    }
+    VirtualProtectEx(hProcess, target, patchSize, oldProt, &oldProt);
+    FlushInstructionCache(hProcess, target, patchSize);
+
+    HookRecord hr;
+    hr.target = target;
+    hr.patchSize = patchSize;
+    hr.originalBytes = orig;
+    hr.trampolineAddr = tramp;
+    hr.trampolineSize = trampSize;
+    hr.installed = true;
+    hr.description = "x64 abs JMP trampoline";
+    g_hooks.push_back(hr);
+
+    char msg[256];
+    sprintf_s(msg, "Hook installed: target=0x%p tramp=0x%p (%zu bytes)",
+        target, tramp, trampSize);
+    LogToStatus(msg);
+    RefreshHooksUI();
+}
+
+void RestoreSelectedHook() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    DWORD sel = 0;
+    SendMessage(hLstHooks, EM_GETSEL, (WPARAM)&sel, 0);
+    int li = (int)SendMessage(hLstHooks, EM_LINEFROMCHAR, (WPARAM)sel, 0);
+    int idx = li - 2;
+    if (idx < 0 || idx >= (int)g_hooks.size()) {
+        LogToStatus("Click a hook line first", true); return;
+    }
+    HookRecord& h = g_hooks[idx];
+    if (!h.installed) { LogToStatus("Hook already restored", true); return; }
+    DWORD oldProt = 0;
+    if (!VirtualProtectEx(hProcess, h.target, h.patchSize, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LogToStatus("VirtualProtectEx failed", true); return;
+    }
+    SIZE_T w;
+    WriteProcessMemory(hProcess, h.target, h.originalBytes.data(), h.patchSize, &w);
+    VirtualProtectEx(hProcess, h.target, h.patchSize, oldProt, &oldProt);
+    FlushInstructionCache(hProcess, h.target, h.patchSize);
+    if (h.trampolineAddr) VirtualFreeEx(hProcess, h.trampolineAddr, 0, MEM_RELEASE);
+    h.installed = false;
+    LogToStatus("Hook restored and trampoline freed");
+    RefreshHooksUI();
+}
+
+void RefreshHooksUI() {
+    if (!hLstHooks) return;
+    ClearEditText(hLstHooks);
+    AppendEditText(hLstHooks, "Idx  Status     Target              Trampoline          Size   Description");
+    AppendEditText(hLstHooks, "-----+----------+-------------------+-------------------+------+-------------------");
+    for (int i = 0; i < (int)g_hooks.size(); i++) {
+        HookRecord& h = g_hooks[i];
+        char line[320];
+        sprintf_s(line, "[%2d] %-9s  0x%016llX  0x%016llX  %5zu  %s",
+            i, h.installed ? "ACTIVE" : "RESTORED",
+            (unsigned long long)(uintptr_t)h.target,
+            (unsigned long long)(uintptr_t)h.trampolineAddr,
+            h.trampolineSize, h.description.c_str());
+        AppendEditText(hLstHooks, line);
+    }
+}
+
+static uintptr_t PatcherParseAddr(HWND hEdit) {
+    char buf[64] = {};
+    GetWindowTextA(hEdit, buf, sizeof(buf));
+    return (uintptr_t)strtoull(buf, nullptr, 0);
+}
+
+static int PatcherParseInt(HWND hEdit, int defv) {
+    char buf[32] = {};
+    GetWindowTextA(hEdit, buf, sizeof(buf));
+    if (!buf[0]) return defv;
+    return (int)strtoul(buf, nullptr, 0);
+}
+
+
+static bool PatcherWriteRemote(LPVOID addr, const BYTE* data, SIZE_T sz) {
+    DWORD oldProt = 0;
+    if (!VirtualProtectEx(hProcess, addr, sz, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LogToStatus("VirtualProtectEx failed at target", true);
+        return false;
+    }
+    SIZE_T w = 0;
+    BOOL ok = WriteProcessMemory(hProcess, addr, data, sz, &w);
+    VirtualProtectEx(hProcess, addr, sz, oldProt, &oldProt);
+    if (!ok || w != sz) { LogToStatus("WriteProcessMemory failed", true); return false; }
+    FlushInstructionCache(hProcess, addr, sz);
+    return true;
+}
+
+
+static bool PatcherReadRemote(LPVOID addr, SIZE_T sz, std::vector<BYTE>& out) {
+    out.assign(sz, 0);
+    SIZE_T r = 0;
+    if (!ReadProcessMemory(hProcess, addr, out.data(), sz, &r) || r != sz) {
+        LogToStatus("ReadProcessMemory failed", true);
+        return false;
+    }
+    return true;
+}
+
+static void PatcherRecord(const PatchRecord& pr) {
+    g_patches.push_back(pr);
+    PatcherRefreshList();
+}
+
+void PatcherRefreshList() {
+    if (!hLstPatches) return;
+    ClearEditText(hLstPatches);
+    AppendEditText(hLstPatches,
+        "Idx  Status     Kind         Target              Size   Cave                Description");
+    AppendEditText(hLstPatches,
+        "-----+----------+------------+-------------------+------+-------------------+-------------------");
+    for (int i = 0; i < (int)g_patches.size(); i++) {
+        PatchRecord& p = g_patches[i];
+        char line[400];
+        sprintf_s(line, "[%2d] %-9s  %-11s  0x%016llX  %5zu  0x%016llX  %s",
+            i,
+            p.installed ? "ACTIVE" : "RESTORED",
+            p.kind.c_str(),
+            (unsigned long long)(uintptr_t)p.target,
+            p.patchSize,
+            (unsigned long long)(uintptr_t)p.caveAddr,
+            p.description.c_str());
+        AppendEditText(hLstPatches, line);
+    }
+}
+
+void PatcherReadAndShow() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t addr = PatcherParseAddr(hEditPatchAddr);
+    int sz = PatcherParseInt(hEditPatchSize, 32);
+    if (!addr || sz <= 0 || sz > 1024) {
+        LogToStatus("Invalid address or size (1..1024)", true); return;
+    }
+    std::vector<BYTE> buf;
+    if (!PatcherReadRemote((LPVOID)addr, sz, buf)) return;
+    std::string hex; hex.reserve(sz * 3);
+    char tmp[8];
+    for (int i = 0; i < sz; i++) {
+        sprintf_s(tmp, "%02X ", buf[i]);
+        hex += tmp;
+    }
+    SetWindowTextA(hEditPatchBytes, hex.c_str());
+    char msg[128]; sprintf_s(msg, "Read %d bytes from 0x%llX", sz, (unsigned long long)addr);
+    LogToStatus(msg);
+}
+
+void PatcherDisassembleAtAddr() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t addr = PatcherParseAddr(hEditPatchAddr);
+    int sz = PatcherParseInt(hEditPatchSize, 32);
+    if (!addr || sz <= 0 || sz > 1024) {
+        LogToStatus("Invalid address or size (1..1024)", true); return;
+    }
+    std::vector<BYTE> buf;
+    if (!PatcherReadRemote((LPVOID)addr, sz, buf)) return;
+
+    std::string out;
+    size_t pos = 0;
+    char line[256], instr[200];
+    int safety = 0;
+    while (pos < buf.size() && safety++ < 128) {
+        int consumed = DisasmOne(buf.data() + pos, buf.size() - pos,
+                                 (uint64_t)addr + pos, instr, sizeof(instr));
+        if (consumed <= 0) consumed = 1;
+        char hex[64] = {}; int hp = 0;
+        for (int i = 0; i < consumed && hp < (int)sizeof(hex) - 3; i++)
+            hp += sprintf_s(hex + hp, sizeof(hex) - hp, "%02X ", buf[pos + i]);
+        sprintf_s(line, "%016llX  %-24s %s\r\n",
+            (unsigned long long)(addr + pos), hex, instr);
+        out += line;
+        pos += consumed;
+    }
+    SetWindowTextA(hEditPatchDisasm, out.c_str());
+    LogToStatus("Disassembly updated");
+}
+
+void PatcherWriteRawBytes() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t addr = PatcherParseAddr(hEditPatchAddr);
+    if (!addr) { LogToStatus("Enter a target address (hex 0x...)", true); return; }
+
+    char hexBuf[8192] = {};
+    GetWindowTextA(hEditPatchPayload, hexBuf, sizeof(hexBuf));
+    std::vector<BYTE> bytes; std::vector<bool> mask;
+    if (!ParseAOB(hexBuf, bytes, mask) || bytes.empty()) {
+        LogToStatus("Enter payload bytes (e.g. 90 90 90)", true); return;
+    }
+
+    std::vector<BYTE> orig;
+    if (!PatcherReadRemote((LPVOID)addr, bytes.size(), orig)) return;
+    if (!PatcherWriteRemote((LPVOID)addr, bytes.data(), bytes.size())) return;
+
+    PatchRecord pr;
+    pr.target = (LPVOID)addr;
+    pr.patchSize = bytes.size();
+    pr.originalBytes = orig;
+    pr.installed = true;
+    pr.kind = "Bytes";
+    char d[128]; sprintf_s(d, "raw write %zu B", bytes.size());
+    pr.description = d;
+    PatcherRecord(pr);
+
+    char msg[160];
+    sprintf_s(msg, "Wrote %zu byte(s) at 0x%llX", bytes.size(), (unsigned long long)addr);
+    LogToStatus(msg);
+}
+
+void PatcherNopOut() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t addr = PatcherParseAddr(hEditPatchAddr);
+    int n = PatcherParseInt(hEditPatchNopLen, 0);
+    if (!addr) { LogToStatus("Enter a target address", true); return; }
+    if (n <= 0 || n > 4096) { LogToStatus("NOP length 1..4096", true); return; }
+
+    std::vector<BYTE> orig;
+    if (!PatcherReadRemote((LPVOID)addr, n, orig)) return;
+    std::vector<BYTE> nops(n, 0x90);
+    if (!PatcherWriteRemote((LPVOID)addr, nops.data(), n)) return;
+
+    PatchRecord pr;
+    pr.target = (LPVOID)addr;
+    pr.patchSize = n;
+    pr.originalBytes = orig;
+    pr.installed = true;
+    pr.kind = "NOP";
+    char d[96]; sprintf_s(d, "NOP-out %d B", n);
+    pr.description = d;
+    PatcherRecord(pr);
+
+    char msg[160];
+    sprintf_s(msg, "NOP'd %d byte(s) at 0x%llX", n, (unsigned long long)addr);
+    LogToStatus(msg);
+}
+
+void PatcherShortJmp() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t src = PatcherParseAddr(hEditPatchAddr);
+    uintptr_t dst = PatcherParseAddr(hEditPatchJmpTarget);
+    if (!src || !dst) { LogToStatus("Enter both source and jump-to addresses", true); return; }
+
+    int64_t rel = (int64_t)dst - (int64_t)(src + 2);
+    if (rel < -128 || rel > 127) {
+        LogToStatus("Short JMP out of range (-128..+127). Use Near JMP instead.", true);
+        return;
+    }
+    BYTE patch[2] = { 0xEB, (BYTE)(int8_t)rel };
+
+    std::vector<BYTE> orig;
+    if (!PatcherReadRemote((LPVOID)src, 2, orig)) return;
+    if (!PatcherWriteRemote((LPVOID)src, patch, 2)) return;
+
+    PatchRecord pr;
+    pr.target = (LPVOID)src;
+    pr.patchSize = 2;
+    pr.originalBytes = orig;
+    pr.installed = true;
+    pr.kind = "JMP-short";
+    char d[128];
+    sprintf_s(d, "EB %02X  -> 0x%llX", (BYTE)(int8_t)rel, (unsigned long long)dst);
+    pr.description = d;
+    PatcherRecord(pr);
+
+    char msg[160];
+    sprintf_s(msg, "Short JMP installed: 0x%llX -> 0x%llX",
+        (unsigned long long)src, (unsigned long long)dst);
+    LogToStatus(msg);
+}
+
+void PatcherNearJmp() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t src = PatcherParseAddr(hEditPatchAddr);
+    uintptr_t dst = PatcherParseAddr(hEditPatchJmpTarget);
+    if (!src || !dst) { LogToStatus("Enter both source and jump-to addresses", true); return; }
+
+    int64_t rel = (int64_t)dst - (int64_t)(src + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        LogToStatus("Near JMP rel32 out of range. Use a code cave for absolute jmp.", true);
+        return;
+    }
+    BYTE patch[5];
+    patch[0] = 0xE9;
+    int32_t rel32 = (int32_t)rel;
+    memcpy(patch + 1, &rel32, 4);
+
+    std::vector<BYTE> orig;
+    if (!PatcherReadRemote((LPVOID)src, 5, orig)) return;
+    if (!PatcherWriteRemote((LPVOID)src, patch, 5)) return;
+
+    PatchRecord pr;
+    pr.target = (LPVOID)src;
+    pr.patchSize = 5;
+    pr.originalBytes = orig;
+    pr.installed = true;
+    pr.kind = "JMP-near";
+    char d[128];
+    sprintf_s(d, "E9 rel32 -> 0x%llX", (unsigned long long)dst);
+    pr.description = d;
+    PatcherRecord(pr);
+
+    char msg[160];
+    sprintf_s(msg, "Near JMP installed: 0x%llX -> 0x%llX",
+        (unsigned long long)src, (unsigned long long)dst);
+    LogToStatus(msg);
+}
+
+void PatcherInstallCodeCave() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    uintptr_t target = PatcherParseAddr(hEditPatchAddr);
+    if (!target) { LogToStatus("Enter a target address", true); return; }
+
+    char scStr[8192] = {};
+    GetWindowTextA(hEditPatchPayload, scStr, sizeof(scStr));
+    std::vector<BYTE> userSc; std::vector<bool> userMask;
+    if (!ParseAOB(scStr, userSc, userMask)) userSc.clear();
+
+    int reqCave = PatcherParseInt(hEditPatchCaveSize, 256);
+    if (reqCave < 64) reqCave = 64;
+    if (reqCave > 65536) reqCave = 65536;
+
+    const SIZE_T patchSize  = 14;
+    const SIZE_T jmpBackSz  = 14;
+
+    std::vector<BYTE> orig;
+    if (!PatcherReadRemote((LPVOID)target, patchSize, orig)) return;
+
+    SIZE_T needed = userSc.size() + patchSize + jmpBackSz;
+    SIZE_T caveSize = (SIZE_T)reqCave;
+    if (caveSize < needed) caveSize = needed;
+
+    LPVOID cave = VirtualAllocEx(hProcess, nullptr, caveSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!cave) { LogToStatus("VirtualAllocEx (cave) failed", true); return; }
+
+    std::vector<BYTE> caveBuf(caveSize, 0x90);
+    if (!userSc.empty())
+        memcpy(caveBuf.data(), userSc.data(), userSc.size());
+    memcpy(caveBuf.data() + userSc.size(), orig.data(), patchSize);
+
+    uintptr_t backAddr = target + patchSize;
+    BYTE* jb = caveBuf.data() + userSc.size() + patchSize;
+    jb[0] = 0xFF; jb[1] = 0x25;
+    jb[2] = jb[3] = jb[4] = jb[5] = 0;
+    memcpy(jb + 6, &backAddr, 8);
+
+    SIZE_T w = 0;
+    if (!WriteProcessMemory(hProcess, cave, caveBuf.data(), caveSize, &w) || w != caveSize) {
+        VirtualFreeEx(hProcess, cave, 0, MEM_RELEASE);
+        LogToStatus("Failed to write cave contents", true); return;
+    }
+
+    BYTE patch[14];
+    patch[0] = 0xFF; patch[1] = 0x25;
+    patch[2] = patch[3] = patch[4] = patch[5] = 0;
+    uintptr_t caveU = (uintptr_t)cave;
+    memcpy(patch + 6, &caveU, 8);
+    if (!PatcherWriteRemote((LPVOID)target, patch, patchSize)) {
+        VirtualFreeEx(hProcess, cave, 0, MEM_RELEASE);
+        return;
+    }
+
+    PatchRecord pr;
+    pr.target = (LPVOID)target;
+    pr.patchSize = patchSize;
+    pr.originalBytes = orig;
+    pr.caveAddr = cave;
+    pr.caveSize = caveSize;
+    pr.installed = true;
+    pr.kind = "Cave";
+    char d[160];
+    sprintf_s(d, "abs JMP -> cave (payload=%zu B, cave=%zu B)", userSc.size(), caveSize);
+    pr.description = d;
+    PatcherRecord(pr);
+
+    char msg[200];
+    sprintf_s(msg, "Code cave installed: target=0x%llX cave=0x%llX",
+        (unsigned long long)target, (unsigned long long)caveU);
+    LogToStatus(msg);
+}
+
+void PatcherRestoreSelected() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    DWORD sel = 0;
+    SendMessage(hLstPatches, EM_GETSEL, (WPARAM)&sel, 0);
+    int li = (int)SendMessage(hLstPatches, EM_LINEFROMCHAR, (WPARAM)sel, 0);
+    int idx = li - 2;  
+    if (idx < 0 || idx >= (int)g_patches.size()) {
+        LogToStatus("Click a patch row first", true); return;
+    }
+    PatchRecord& p = g_patches[idx];
+    if (!p.installed) { LogToStatus("Patch already restored", true); return; }
+    if (!PatcherWriteRemote(p.target, p.originalBytes.data(), p.patchSize)) return;
+    if (p.caveAddr) {
+        VirtualFreeEx(hProcess, p.caveAddr, 0, MEM_RELEASE);
+        p.caveAddr = nullptr;
+    }
+    p.installed = false;
+    LogToStatus("Patch restored");
+    PatcherRefreshList();
+}
+
+void EnumerateExports() {
+    g_exports.clear();
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+    HMODULE mods[1024]; DWORD needed = 0;
+    if (!EnumProcessModules(hProcess, mods, sizeof(mods), &needed)) {
+        LogToStatus("EnumProcessModules failed", true); return;
+    }
+    DWORD count = needed / sizeof(HMODULE);
+
+    for (DWORD i = 0; i < count; i++) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameExA(hProcess, mods[i], path, MAX_PATH);
+        const char* nm = strrchr(path, '\\'); nm = nm ? nm + 1 : path;
+        std::string modName = nm;
+
+        IMAGE_DOS_HEADER dos = {};
+        SIZE_T r = 0;
+        if (!ReadProcessMemory(hProcess, mods[i], &dos, sizeof(dos), &r) || r != sizeof(dos)) continue;
+        if (dos.e_magic != IMAGE_DOS_SIGNATURE) continue;
+        IMAGE_NT_HEADERS nt = {};
+        if (!ReadProcessMemory(hProcess, (BYTE*)mods[i] + dos.e_lfanew, &nt, sizeof(nt), &r) ||
+            r != sizeof(nt)) continue;
+        if (nt.Signature != IMAGE_NT_SIGNATURE) continue;
+        IMAGE_DATA_DIRECTORY& ed = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (ed.Size == 0 || ed.VirtualAddress == 0) continue;
+
+        IMAGE_EXPORT_DIRECTORY exp = {};
+        if (!ReadProcessMemory(hProcess, (BYTE*)mods[i] + ed.VirtualAddress, &exp, sizeof(exp), &r) ||
+            r != sizeof(exp)) continue;
+        DWORD nFuncs = exp.NumberOfFunctions;
+        DWORD nNames = exp.NumberOfNames;
+        if (nFuncs == 0 || nFuncs > 200000) continue;
+
+        std::vector<DWORD> funcTbl(nFuncs);
+        ReadProcessMemory(hProcess, (BYTE*)mods[i] + exp.AddressOfFunctions,
+                          funcTbl.data(), nFuncs * sizeof(DWORD), &r);
+        if (nNames > 0 && nNames < 200000) {
+            std::vector<DWORD> nameTbl(nNames);
+            std::vector<WORD>  ordTbl(nNames);
+            ReadProcessMemory(hProcess, (BYTE*)mods[i] + exp.AddressOfNames,
+                              nameTbl.data(), nNames * sizeof(DWORD), &r);
+            ReadProcessMemory(hProcess, (BYTE*)mods[i] + exp.AddressOfNameOrdinals,
+                              ordTbl.data(), nNames * sizeof(WORD), &r);
+            for (DWORD j = 0; j < nNames; j++) {
+                char name[256] = {};
+                ReadProcessMemory(hProcess, (BYTE*)mods[i] + nameTbl[j], name, sizeof(name) - 1, &r);
+                ExportEntry e;
+                e.moduleName = modName;
+                e.funcName   = name;
+                e.ordinal    = ordTbl[j] + exp.Base;
+                e.address    = (LPVOID)((BYTE*)mods[i] + funcTbl[ordTbl[j]]);
+                g_exports.push_back(e);
+            }
+        }
+    }
+    char msg[128];
+    sprintf_s(msg, "Enumerated %zu export(s) across %lu module(s)",
+        g_exports.size(), count);
+    LogToStatus(msg);
+    RefreshExportsUI();
+}
+
+void RefreshExportsUI() {
+    if (!hLstExports) return;
+    ClearEditText(hLstExports);
+    char filter[128] = {};
+    GetWindowTextA(hEditExpFilter, filter, sizeof(filter));
+    std::string fl = filter;
+    std::transform(fl.begin(), fl.end(), fl.begin(), ::tolower);
+
+    AppendEditText(hLstExports, "Module             Ordinal  Address              Function");
+    AppendEditText(hLstExports, "-------------------+--------+--------------------+--------------------");
+    int n = 0;
+    for (auto& e : g_exports) {
+        if (!fl.empty()) {
+            std::string a = e.funcName, b = e.moduleName;
+            std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+            std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+            if (a.find(fl) == std::string::npos && b.find(fl) == std::string::npos) continue;
+        }
+        char line[512];
+        sprintf_s(line, "%-19s %6lu  0x%016llX  %s",
+            e.moduleName.c_str(), e.ordinal,
+            (unsigned long long)(uintptr_t)e.address, e.funcName.c_str());
+        AppendEditText(hLstExports, line);
+        n++;
+        if (n >= 20000) {
+            AppendEditText(hLstExports, "... (truncated at 20000; refine filter)");
+            break;
+        }
+    }
+    char msg[128]; sprintf_s(msg, "Showing %d export(s) (filter: \"%s\")", n, filter);
+    LogToStatus(msg);
+}
+
+void GoToSelectedExport() {
+    DWORD sel = 0;
+    SendMessage(hLstExports, EM_GETSEL, (WPARAM)&sel, 0);
+    int li = (int)SendMessage(hLstExports, EM_LINEFROMCHAR, (WPARAM)sel, 0);
+    int ls = (int)SendMessage(hLstExports, EM_LINEINDEX, (WPARAM)li, 0);
+    int ll = (int)SendMessage(hLstExports, EM_LINELENGTH, (WPARAM)ls, 0);
+    if (ll <= 0 || ll >= 512) { LogToStatus("Click an export line first", true); return; }
+    std::string buf(ll + 2, '\0');
+    buf[0] = (char)(ll & 0xFF); buf[1] = (char)((ll >> 8) & 0xFF);
+    SendMessageA(hLstExports, EM_GETLINE, (WPARAM)li, (LPARAM)&buf[0]);
+    const char* p = strstr(buf.c_str(), "0x");
+    if (!p) { LogToStatus("No address on this line", true); return; }
+    LPVOID addr = (LPVOID)strtoull(p, nullptr, 16);
+    if (!addr) { LogToStatus("Invalid address parsed", true); return; }
+    SetSelectedAddress(addr);
+    char info[256]; sprintf_s(info, "Selected (export): 0x%p", addr);
+    SetWindowTextA(hStaticAddressInfo, info);
+    char hex[32]; sprintf_s(hex, "0x%llX", (uintptr_t)addr);
+    SetWindowTextA(hEditScAddr, hex);
+    ShowHexAtAddress(addr, addr);
+    TabCtrl_SetCurSel(hTabCtrl, 0);
+    ShowWindow(hPageScan, SW_SHOW);
+    ShowWindow(hPageMods, SW_HIDE); ShowWindow(hPageInject, SW_HIDE);
+    ShowWindow(hPageWnd, SW_HIDE); ShowWindow(hPageDetect, SW_HIDE);
+    ShowWindow(hPageShellcode, SW_HIDE); ShowWindow(hPageVerify, SW_HIDE);
+    ShowWindow(hPageTrigger, SW_HIDE);
+    if (hPagePtrHook) ShowWindow(hPagePtrHook, SW_HIDE);
+    if (hPageExpHnd)  ShowWindow(hPageExpHnd, SW_HIDE);
+    if (hPagePatcher) ShowWindow(hPagePatcher, SW_HIDE);
+    LogToStatus("Jumped to export in hex view (Scanner tab)");
+}
+
+typedef struct _MEMI_SYS_HANDLE {
+    USHORT UniqueProcessId;
+    USHORT CreatorBackTraceIndex;
+    UCHAR  ObjectTypeIndex;
+    UCHAR  HandleAttributes;
+    USHORT HandleValue;
+    PVOID  Object;
+    ULONG  GrantedAccess;
+} MEMI_SYS_HANDLE;
+typedef struct _MEMI_SYS_HANDLE_INFO {
+    ULONG HandleCount;
+    MEMI_SYS_HANDLE Handles[1];
+} MEMI_SYS_HANDLE_INFO;
+
+typedef NTSTATUS (WINAPI* tNtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
+typedef NTSTATUS (WINAPI* tNtQueryObject)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+typedef struct _MEMI_UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } MEMI_UNICODE_STRING;
+
+void EnumerateHandles() {
+    g_handles.clear();
+    if (!currentPID) { LogToStatus("Attach to a process first", true); return; }
+    HMODULE hNt = GetModuleHandleA("ntdll.dll");
+    if (!hNt) { LogToStatus("ntdll missing", true); return; }
+    tNtQuerySystemInformation pNQSI = (tNtQuerySystemInformation)GetProcAddress(hNt, "NtQuerySystemInformation");
+    tNtQueryObject pNQO = (tNtQueryObject)GetProcAddress(hNt, "NtQueryObject");
+    if (!pNQSI || !pNQO) { LogToStatus("ntdll exports unavailable", true); return; }
+
+    ULONG bufSize = 0x10000;
+    std::vector<BYTE> buf;
+    NTSTATUS s = (NTSTATUS)0xC0000004;  
+    for (int tries = 0; tries < 12; tries++) {
+        buf.assign(bufSize, 0);
+        ULONG ret = 0;
+        s = pNQSI(0x10 /*SystemHandleInformation*/, buf.data(), bufSize, &ret);
+        if (s == 0) break;
+        bufSize *= 2;
+        if (bufSize > 0x10000000) break;
+    }
+    if (s != 0) { LogToStatus("NtQuerySystemInformation failed", true); return; }
+
+    MEMI_SYS_HANDLE_INFO* shi = (MEMI_SYS_HANDLE_INFO*)buf.data();
+    HANDLE hProc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, currentPID);
+    if (!hProc) { LogToStatus("OpenProcess(PROCESS_DUP_HANDLE) failed", true); return; }
+
+    for (ULONG i = 0; i < shi->HandleCount; i++) {
+        MEMI_SYS_HANDLE& e = shi->Handles[i];
+        if (e.UniqueProcessId != (USHORT)currentPID) continue;
+
+        HandleInfoEntry he;
+        he.handleValue   = e.HandleValue;
+        he.objType       = e.ObjectTypeIndex;
+        he.object        = e.Object;
+        he.grantedAccess = e.GrantedAccess;
+
+        HANDLE dup = NULL;
+        BOOL ok = DuplicateHandle(hProc, (HANDLE)(uintptr_t)e.HandleValue,
+                                  GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        if (ok && dup) {
+            BYTE typeBuf[1024] = {};
+            ULONG tlen = 0;
+            if (pNQO(dup, 2, typeBuf, sizeof(typeBuf), &tlen) == 0) {
+                MEMI_UNICODE_STRING* us = (MEMI_UNICODE_STRING*)typeBuf;
+                if (us->Buffer && us->Length > 0 && us->Length < 512) {
+                    char tname[256] = {};
+                    int n = WideCharToMultiByte(CP_UTF8, 0, us->Buffer, us->Length / 2,
+                                                tname, 255, NULL, NULL);
+                    if (n > 0) { tname[n] = 0; he.typeName = tname; }
+                }
+            }
+
+            bool skipName = (he.typeName == "File" && (e.GrantedAccess == 0x0012019F));
+            if (!skipName) {
+                BYTE nameBuf[2048] = {};
+                ULONG nlen = 0;
+                if (pNQO(dup, 1, nameBuf, sizeof(nameBuf), &nlen) == 0) {
+                    MEMI_UNICODE_STRING* us = (MEMI_UNICODE_STRING*)nameBuf;
+                    if (us->Buffer && us->Length > 0 && us->Length < 1024) {
+                        char nname[1024] = {};
+                        int n = WideCharToMultiByte(CP_UTF8, 0, us->Buffer, us->Length / 2,
+                                                    nname, 1023, NULL, NULL);
+                        if (n > 0) { nname[n] = 0; he.objName = nname; }
+                    }
+                }
+            } else {
+                he.objName = "(File - name skipped to avoid deadlock)";
+            }
+            CloseHandle(dup);
+        }
+        g_handles.push_back(he);
+    }
+    CloseHandle(hProc);
+
+    char msg[128]; sprintf_s(msg, "Enumerated %zu handle(s) for PID %d",
+        g_handles.size(), currentPID);
+    LogToStatus(msg);
+    RefreshHandlesUI();
+}
+
+void RefreshHandlesUI() {
+    if (!hLstHandles) return;
+    ClearEditText(hLstHandles);
+    char filter[128] = {};
+    GetWindowTextA(hEditHndFilter, filter, sizeof(filter));
+    std::string fl = filter;
+    std::transform(fl.begin(), fl.end(), fl.begin(), ::tolower);
+
+    AppendEditText(hLstHandles, "Handle   Type             Access     Object              Name");
+    AppendEditText(hLstHandles, "--------+----------------+----------+-------------------+-------------------");
+    int n = 0;
+    for (auto& h : g_handles) {
+        if (!fl.empty()) {
+            std::string a = h.typeName, b = h.objName;
+            std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+            std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+            if (a.find(fl) == std::string::npos && b.find(fl) == std::string::npos) continue;
+        }
+        char line[1280];
+        sprintf_s(line, "0x%04X   %-16s 0x%08X  0x%016llX  %s",
+            h.handleValue, h.typeName.c_str(), h.grantedAccess,
+            (unsigned long long)(uintptr_t)h.object, h.objName.c_str());
+        AppendEditText(hLstHandles, line);
+        n++;
+    }
+    char msg[128]; sprintf_s(msg, "Showing %d handle(s) (filter: \"%s\")", n, filter);
+    LogToStatus(msg);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
     switch(msg){
 
@@ -2659,10 +4720,15 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         {TCITEMA ti={};ti.mask=TCIF_TEXT;
          ti.pszText=(LPSTR)"Memory Scanner"; TabCtrl_InsertItem(hTabCtrl,0,&ti);
          ti.pszText=(LPSTR)"Modules & DLL";  TabCtrl_InsertItem(hTabCtrl,1,&ti);
-         ti.pszText=(LPSTR)"Cde Inj"; TabCtrl_InsertItem(hTabCtrl,2,&ti);
+         ti.pszText=(LPSTR)"Cde Inj";        TabCtrl_InsertItem(hTabCtrl,2,&ti);
          ti.pszText=(LPSTR)"Window Writer";  TabCtrl_InsertItem(hTabCtrl,3,&ti);
          ti.pszText=(LPSTR)"Detect Inj";     TabCtrl_InsertItem(hTabCtrl,4,&ti);
-         ti.pszText=(LPSTR)"Shellcode Exec"; TabCtrl_InsertItem(hTabCtrl,5,&ti);}
+         ti.pszText=(LPSTR)"Shellcode Exec"; TabCtrl_InsertItem(hTabCtrl,5,&ti);
+         ti.pszText=(LPSTR)"Verify";         TabCtrl_InsertItem(hTabCtrl,6,&ti);
+         ti.pszText = (LPSTR)"Trigger & Monitor"; TabCtrl_InsertItem(hTabCtrl, 7, &ti);
+         ti.pszText = (LPSTR)"Pointers & Hooks";  TabCtrl_InsertItem(hTabCtrl, 8, &ti);
+         ti.pszText = (LPSTR)"Exports & Handles"; TabCtrl_InsertItem(hTabCtrl, 9, &ti);
+         ti.pszText = (LPSTR)"Binary Patcher";    TabCtrl_InsertItem(hTabCtrl,10, &ti);}
         RECT tabRc;GetClientRect(hTabCtrl,&tabRc);
         TabCtrl_AdjustRect(hTabCtrl,FALSE,&tabRc);
         int px=tabRc.left,py=tabRc.top,pw=tabRc.right-tabRc.left,ph=tabRc.bottom-tabRc.top;
@@ -2676,8 +4742,36 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hPageWnd   =CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageDetect=CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,          px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageShellcode=CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,       px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
-
+        hPageVerify = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS,        px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageTrigger = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPagePtrHook = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageExpHnd  = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPagePatcher = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hHdrScan=B(hPageScan,"STATIC","MEMORY SCANNING",0,5,5,220,18,0,hFontSection);
+
+        B(hPageTrigger, "STATIC", "TRIGGER SHELLCODE / DLL EXPORT", 0, 5, 5, 300, 18, 0, hFontSection);
+        B(hPageTrigger, "STATIC", "Target address:", 0, 5, 32, 100, 22, 0);
+        hEditTriggerAddr = B(hPageTrigger, "EDIT", "0x0", WS_BORDER | ES_AUTOHSCROLL, 110, 30, 200, 24, ID_EDIT_TRIGGER_ADDR, hFontMono);
+        B(hPageTrigger, "STATIC", "Method:", 0, 5, 62, 50, 22, 0);
+        hCmbTriggerMethod = B(hPageTrigger, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 60, 58, 150, 80, ID_CMB_TRIGGER_METHOD);
+        SendMessageA(hCmbTriggerMethod, CB_ADDSTRING, 0, (LPARAM)"CreateRemoteThread");
+        SendMessageA(hCmbTriggerMethod, CB_ADDSTRING, 0, (LPARAM)"QueueUserAPC");
+        SendMessageA(hCmbTriggerMethod, CB_ADDSTRING, 0, (LPARAM)"DLL Export (from Shellcode Exec tab)");
+        SendMessage(hCmbTriggerMethod, CB_SETCURSEL, 0, 0);
+        B(hPageTrigger, "STATIC", "APC TID:", 0, 220, 58, 60, 22, 0);
+        B(hPageTrigger, "BUTTON", "Use last TID", BS_PUSHBUTTON, 370, 58, 80, 24, ID_BTN_USE_LAST_TID, hFontSmall);
+        hEditApcTid = B(hPageTrigger, "EDIT", "0", WS_BORDER | ES_NUMBER, 285, 58, 80, 24, ID_EDIT_APC_TID, hFontMono);
+        hBtnTrigger = B(hPageTrigger, "BUTTON", "TRIGGER NOW", 0, 380, 58, 120, 28, ID_BTN_TRIGGER);
+        B(hPageTrigger, "BUTTON", "Clear Log", 0, 510, 60, 80, 24, ID_BTN_TRIGGER_CLEAR_LOG);
+        hLstTriggerLog = MakeDE(hPageTrigger, 5, 100, 1200, 200, ID_LST_TRIGGER_LOG);
+        B(hPageTrigger, "STATIC", "Optional: Read output buffer after trigger", 0, 5, 310, 300, 18, 0, hFontSmall);
+        B(hPageTrigger, "STATIC", "Output addr:", 0, 5, 332, 80, 22, 0);
+        hEditOutputAddr = B(hPageTrigger, "EDIT", "0x0", WS_BORDER | ES_AUTOHSCROLL, 90, 330, 150, 24, ID_EDIT_OUTPUT_ADDR, hFontMono);
+        B(hPageTrigger, "STATIC", "Size (bytes):", 0, 250, 332, 80, 22, 0);
+        hEditOutputSize = B(hPageTrigger, "EDIT", "16", WS_BORDER | ES_NUMBER, 335, 330, 80, 24, ID_EDIT_OUTPUT_SIZE, hFontMono);
+        hBtnReadOutput = B(hPageTrigger, "BUTTON", "Read Output", 0, 425, 330, 100, 24, ID_BTN_READ_OUTPUT);
+        B(hPageTrigger, "STATIC", "Sentinel check (same as Verify tab)", 0, 5, 366, 250, 18, 0, hFontSmall);
+        hBtnCheckSentinel2 = B(hPageTrigger, "BUTTON", "Check Sentinel", 0, 260, 364, 120, 24, ID_BTN_CHECK_SENTINEL2);
 
         B(hPageScan,"STATIC","Value:",0,5,32,42,22,0);
         hEditScanValue=B(hPageScan,"EDIT","",WS_BORDER|ES_AUTOHSCROLL,50,28,100,26,0,hFontMono);
@@ -2817,6 +4911,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hHdrThreads=B(hPageInject,"STATIC","REMOTE THREADS",0,740,422,250,18,0,hFontSection);
         hBtnListThreads=B(hPageInject,"BUTTON","List Threads",0,1625,420,110,22,ID_BTN_LIST_THREADS);
         B(hPageInject,"BUTTON","Kill Selected",0,1740,420,110,22,ID_BTN_KILL_THREAD);
+        B(hPageInject, "BUTTON", "Copy TID to APC", BS_PUSHBUTTON, 1625, 468, 110, 22, ID_BTN_COPY_TID_TO_APC, hFontSmall);
         hLstThreads=MakeDE(hPageInject,740,446,1155,430,ID_LST_THREADS);
 
         
@@ -2882,6 +4977,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hBtnDetectCopy =B(hPageDetect,"BUTTON","Copy Findings",     0,190,82,120,28,ID_BTN_DETECT_COPY);
         hBtnDetectClear=B(hPageDetect,"BUTTON","Clear",             0,315,82,80,28,ID_BTN_DETECT_CLEAR);
         hBtnDumpSelected=B(hPageDetect,"BUTTON","Dump Selected",     0,400,82,120,28,ID_BTN_DUMP_SELECTED);
+        hBtnAnalyzeDump =B(hPageDetect,"BUTTON","Analyze Shellcode",0,525,82,140,28,ID_BTN_ANALYZE_DUMP);
+
 
         B(hPageDetect,"STATIC",
           "Compares loaded modules against their on-disk image, flags executable regions that are not file-backed,",
@@ -2915,6 +5012,190 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         B(hPageShellcode,"STATIC","Info: Remote Thread = create new thread | APC = queue to existing thread | DLL Export = inject DLL and call exported function",0,5,130,1000,40,0,hFontSmall);
 
+        B(hPageVerify, "STATIC", "VERIFICATION", 0, 5, 5, 200, 18, 0, hFontSection);
+        B(hPageVerify, "STATIC",
+          "Snapshot captures the current state (modules/threads/exec regions/scan values). "
+          "Run checks after injection to confirm what changed.",
+          0, 5, 28, 1700, 16, 0, hFontSmall);
+        
+        hBtnSnapshotVerify = B(hPageVerify, "BUTTON", "Take Snapshot", 0, 5, 52, 130, 26, ID_BTN_SNAPSHOT_VERIFY);
+        hBtnCheckValues    = B(hPageVerify, "BUTTON", "Check Values",  0, 142, 52, 110, 26, ID_BTN_CHECK_VALUES);
+        hBtnCheckModules   = B(hPageVerify, "BUTTON", "Check Modules", 0, 258, 52, 110, 26, ID_BTN_CHECK_MODULES);
+        hBtnCheckThreads   = B(hPageVerify, "BUTTON", "Check Threads", 0, 374, 52, 110, 26, ID_BTN_CHECK_THREADS);
+        hBtnCheckMemory    = B(hPageVerify, "BUTTON", "Check Memory",  0, 490, 52, 110, 26, ID_BTN_CHECK_MEMORY);
+        B(hPageVerify, "BUTTON", "▶ Run All", 0, 606, 52, 90, 26, ID_BTN_VERIFY_ALL);
+        
+        hStaticSnapStatus = B(hPageVerify, "STATIC",
+            "No snapshot taken yet. Click 'Take Snapshot' before injection, then run checks after.",
+            0, 5, 86, 1880, 18, 0, hFontSmall);
+        
+        B(hPageVerify, "STATIC", "Sentinel / Canary:", 0, 5, 112, 140, 22, 0, hFontSection);
+        B(hPageVerify, "STATIC",
+          "Write a known int32 value to a target address in your shellcode to prove it executed. "
+          "Then click Check Sentinel to confirm the value was written by your shellcode.",
+          0, 5, 136, 1400, 16, 0, hFontSmall);
+        B(hPageVerify, "STATIC", "Address:", 0, 5, 158, 60, 22, 0);
+        hEditSentinelAddr = B(hPageVerify, "EDIT", "0x0", WS_BORDER | ES_AUTOHSCROLL, 68, 156, 200, 24,
+                              ID_EDIT_SENTINEL_ADDR, hFontMono);
+        B(hPageVerify, "STATIC", "Expected value after exec:", 0, 276, 158, 195, 22, 0);
+        hEditSentinelVal = B(hPageVerify, "EDIT", "12345", WS_BORDER | ES_NUMBER, 474, 156, 90, 24,
+                             ID_EDIT_SENTINEL_VAL);
+        hBtnCheckSentinel = B(hPageVerify, "BUTTON", "Check Sentinel", 0, 570, 156, 120, 24, ID_BTN_CHECK_SENTINEL);
+        
+        B(hPageVerify, "STATIC",
+          "HOW TO USE:  "
+          "1) Attach to target.  "
+          "2) Click Take Snapshot.  "
+          "3) Inject DLL / write value / execute shellcode.  "
+          "4) Click Run All (or individual checks) to see what changed.",
+          0, 5, 188, 1700, 16, 0, hFontSmall);
+        
+        B(hPageVerify, "STATIC",
+          "Tip – Sentinel:  add 'mov dword [0xADDR], 0xCAFE' at the start of your shellcode, "
+          "set Expected=51966 (0xCAFE) here, then Check Sentinel to confirm execution reached that point.",
+          0, 5, 206, 1700, 16, 0, hFontSmall);
+        
+        B(hPageVerify, "STATIC", "Results:", 0, 5, 232, 80, 18, 0, hFontSection);
+        B(hPageVerify, "BUTTON", "Clear", 0, 1800, 232, 60, 20, ID_BTN_DETECT_CLEAR);  
+        hLstVerify = MakeDE(hPageVerify, 5, 254, 1890, 720, 0);
+        
+
+        B(hPagePtrHook, "STATIC", "MULTI-LEVEL POINTER CHAINS", 0, 5, 5, 320, 18, 0, hFontSection);
+        B(hPagePtrHook, "STATIC", "Name:", 0, 5, 32, 40, 22, 0);
+        hEditChainName = B(hPagePtrHook, "EDIT", "playerHealth", WS_BORDER|ES_AUTOHSCROLL, 48, 30, 160, 24, ID_EDIT_CHAIN_NAME, hFontMono);
+        B(hPagePtrHook, "STATIC", "Module:", 0, 215, 32, 50, 22, 0);
+        hEditChainMod = B(hPagePtrHook, "EDIT", "", WS_BORDER|ES_AUTOHSCROLL, 268, 30, 120, 24, ID_EDIT_CHAIN_MOD, hFontMono);
+        B(hPagePtrHook, "STATIC", "(blank = main exe)", 0, 392, 34, 110, 18, 0, hFontSmall);
+        B(hPagePtrHook, "STATIC", "Base off:", 0, 505, 32, 60, 22, 0);
+        hEditChainBase = B(hPagePtrHook, "EDIT", "0x0", WS_BORDER|ES_AUTOHSCROLL, 568, 30, 130, 24, ID_EDIT_CHAIN_BASE, hFontMono);
+        B(hPagePtrHook, "STATIC", "Offsets (comma sep, hex):", 0, 5, 64, 180, 22, 0);
+        hEditChainOffs = B(hPagePtrHook, "EDIT", "0x10,0x50,0x0", WS_BORDER|ES_AUTOHSCROLL, 188, 60, 510, 24, ID_EDIT_CHAIN_OFFS, hFontMono);
+        B(hPagePtrHook, "BUTTON", "Add Chain", 0, 704, 30, 100, 24, ID_BTN_CHAIN_ADD);
+        B(hPagePtrHook, "BUTTON", "Delete Selected", 0, 810, 30, 130, 24, ID_BTN_CHAIN_DEL);
+        B(hPagePtrHook, "BUTTON", "Resolve -> Selected", 0, 945, 30, 150, 24, ID_BTN_CHAIN_RESOLVE);
+        B(hPagePtrHook, "BUTTON", "Refresh", 0, 1100, 30, 80, 24, ID_BTN_CHAIN_REFRESH);
+        B(hPagePtrHook, "BUTTON", "Save to file", 0, 1185, 30, 100, 24, ID_BTN_CHAIN_SAVE);
+        B(hPagePtrHook, "BUTTON", "Load from file", 0, 1290, 30, 115, 24, ID_BTN_CHAIN_LOAD);
+        B(hPagePtrHook, "STATIC",
+          "Chains are saved to memiscani_chains.txt (next to the .exe) and survive process restarts. "
+          "Click a chain line then 'Resolve -> Selected' to use it as the active address.",
+          0, 5, 88, 1700, 16, 0, hFontSmall);
+        hLstChains = MakeDE(hPagePtrHook, 5, 108, 1890, 240, ID_LST_CHAINS);
+
+        B(hPagePtrHook, "STATIC", "CALL GRAPH TRACER", 0, 5, 358, 260, 18, 0, hFontSection);
+        B(hPagePtrHook, "STATIC", "Start addr:", 0, 5, 384, 75, 22, 0);
+        hEditCgAddr = B(hPagePtrHook, "EDIT", "0x0", WS_BORDER|ES_AUTOHSCROLL, 82, 382, 200, 24, ID_EDIT_CG_ADDR, hFontMono);
+        B(hPagePtrHook, "STATIC", "Max depth:", 0, 290, 384, 70, 22, 0);
+        hEditCgDepth = B(hPagePtrHook, "EDIT", "3", WS_BORDER|ES_NUMBER, 362, 382, 50, 24, ID_EDIT_CG_DEPTH, hFontMono);
+        B(hPagePtrHook, "BUTTON", "Trace Calls", 0, 420, 382, 110, 24, ID_BTN_CALLGRAPH);
+        B(hPagePtrHook, "STATIC",
+          "Disassembles from start addr, follows E8 (call) and E9 (jmp) targets recursively. "
+          "Visited set prevents loops. Depth capped at 8.",
+          0, 540, 388, 1000, 16, 0, hFontSmall);
+        hLstCallGraph = MakeDE(hPagePtrHook, 5, 412, 940, 320, ID_LST_CALLGRAPH);
+
+        B(hPagePtrHook, "STATIC", "TRAMPOLINE HOOK BUILDER", 0, 955, 358, 280, 18, 0, hFontSection);
+        B(hPagePtrHook, "STATIC", "Target:", 0, 955, 384, 55, 22, 0);
+        hEditHookAddr = B(hPagePtrHook, "EDIT", "0x0", WS_BORDER|ES_AUTOHSCROLL, 1014, 382, 200, 24, ID_EDIT_HOOK_ADDR, hFontMono);
+        B(hPagePtrHook, "BUTTON", "Install Hook", 0, 1220, 382, 100, 24, ID_BTN_HOOK_INSTALL);
+        B(hPagePtrHook, "BUTTON", "Restore Selected", 0, 1325, 382, 130, 24, ID_BTN_HOOK_RESTORE);
+        B(hPagePtrHook, "BUTTON", "Refresh", 0, 1460, 382, 70, 24, ID_BTN_HOOK_REFRESH);
+        B(hPagePtrHook, "BUTTON", "Help", 0, 1535, 382, 50, 24, ID_BTN_HOOK_HELP);
+        B(hPagePtrHook, "STATIC", "Shellcode (hex bytes - user payload):", 0, 955, 414, 280, 18, 0, hFontSmall);
+        hEditHookSc = B(hPagePtrHook, "EDIT", "", WS_BORDER|ES_AUTOHSCROLL, 955, 432, 935, 24, ID_EDIT_HOOK_SC, hFontMono);
+        hLstHooks = MakeDE(hPagePtrHook, 955, 460, 935, 272, ID_LST_HOOKS);
+
+        B(hPageExpHnd, "STATIC", "EXPORT / IMPORT BROWSER", 0, 5, 5, 300, 18, 0, hFontSection);
+        B(hPageExpHnd, "BUTTON", "Refresh Exports", 0, 5, 30, 130, 24, ID_BTN_EXP_REFRESH);
+        B(hPageExpHnd, "STATIC", "Filter:", 0, 145, 32, 45, 22, 0);
+        hEditExpFilter = B(hPageExpHnd, "EDIT", "", WS_BORDER|ES_AUTOHSCROLL, 195, 30, 300, 24, ID_EDIT_EXP_FILTER, hFontMono);
+        B(hPageExpHnd, "BUTTON", "Apply Filter", 0, 500, 30, 100, 24, ID_BTN_EXP_FILTER);
+        B(hPageExpHnd, "BUTTON", "Go to Selected", 0, 605, 30, 130, 24, ID_BTN_EXP_GOTO);
+        B(hPageExpHnd, "STATIC",
+          "Lists every named export across all loaded modules of the attached process "
+          "(parsed from PE headers in remote memory). Click a row + 'Go to Selected' to "
+          "jump to that address in the Scanner hex view.",
+          0, 5, 60, 1700, 16, 0, hFontSmall);
+        hLstExports = MakeDE(hPageExpHnd, 5, 82, 1890, 420, ID_LST_EXPORTS);
+
+        B(hPageExpHnd, "STATIC", "HANDLE VIEWER", 0, 5, 510, 200, 18, 0, hFontSection);
+        B(hPageExpHnd, "BUTTON", "Enumerate Handles", 0, 5, 534, 150, 24, ID_BTN_HND_REFRESH);
+        B(hPageExpHnd, "STATIC", "Filter:", 0, 165, 536, 45, 22, 0);
+        hEditHndFilter = B(hPageExpHnd, "EDIT", "", WS_BORDER|ES_AUTOHSCROLL, 215, 534, 300, 24, ID_EDIT_HND_FILTER, hFontMono);
+        B(hPageExpHnd, "BUTTON", "Apply Filter", 0, 520, 534, 100, 24, ID_BTN_HND_FILTER);
+        B(hPageExpHnd, "STATIC",
+          "Uses NtQuerySystemInformation(SystemHandleInformation) to list every kernel handle "
+          "open in the target process: Files, Keys, Mutants, Events, Sections, Threads, Processes, etc. "
+          "Read-only. Some 'File' handles are skipped to avoid deadlock on synchronous pipes.",
+          0, 5, 564, 1700, 16, 0, hFontSmall);
+        hLstHandles = MakeDE(hPageExpHnd, 5, 586, 1890, 386, ID_LST_HANDLES);
+
+        B(hPagePatcher, "STATIC", "BINARY PATCHER - MODIFY OPCODES IN A RUNNING PROCESS",
+          0, 5, 5, 700, 18, 0, hFontSection);
+        B(hPagePatcher, "STATIC",
+          "Attach to the target process first (top bar). All addresses are absolute "
+          "virtual addresses in the remote process. Page protection is auto-flipped "
+          "to RWX during the write and restored afterwards. Use 'Restore Selected' "
+          "to revert any patch.",
+          0, 5, 28, 1700, 16, 0, hFontSmall);
+
+        B(hPagePatcher, "STATIC", "Target addr:", 0, 5, 56, 90, 22, 0);
+        hEditPatchAddr = B(hPagePatcher, "EDIT", "0x0",
+            WS_BORDER|ES_AUTOHSCROLL, 100, 54, 220, 24, ID_EDIT_PATCH_ADDR, hFontMono);
+        B(hPagePatcher, "STATIC", "Read len:", 0, 330, 56, 70, 22, 0);
+        hEditPatchSize = B(hPagePatcher, "EDIT", "32",
+            WS_BORDER|ES_NUMBER, 405, 54, 60, 24, ID_EDIT_PATCH_SIZE, hFontMono);
+        B(hPagePatcher, "BUTTON", "Read Bytes", 0, 472, 54, 100, 24, ID_BTN_PATCH_READ);
+        B(hPagePatcher, "BUTTON", "Disassemble", 0, 578, 54, 110, 24, ID_BTN_PATCH_DISASM);
+        B(hPagePatcher, "BUTTON", "Help", 0, 694, 54, 60, 24, ID_BTN_PATCH_HELP);
+
+        B(hPagePatcher, "STATIC", "Original bytes (hex):", 0, 5, 86, 200, 18, 0, hFontSmall);
+        hEditPatchBytes = B(hPagePatcher, "EDIT", "",
+            WS_BORDER|ES_AUTOHSCROLL|ES_READONLY, 5, 106, 1000, 24, ID_EDIT_PATCH_BYTES, hFontMono);
+
+        B(hPagePatcher, "STATIC", "Disassembly:", 0, 5, 134, 200, 18, 0, hFontSmall);
+        hEditPatchDisasm = B(hPagePatcher, "EDIT", "",
+            WS_BORDER|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
+            5, 154, 1000, 110, ID_EDIT_PATCH_DISASM, hFontMono);
+
+        B(hPagePatcher, "STATIC", "1) WRITE RAW BYTES (overwrite at target)",
+          0, 5, 278, 500, 18, 0, hFontSection);
+        B(hPagePatcher, "STATIC", "Payload hex:", 0, 5, 304, 90, 22, 0);
+        hEditPatchPayload = B(hPagePatcher, "EDIT", "90 90 90",
+            WS_BORDER|ES_AUTOHSCROLL, 100, 302, 800, 24, ID_EDIT_PATCH_PAYLOAD, hFontMono);
+        B(hPagePatcher, "BUTTON", "Write Payload", 0, 908, 302, 130, 24, ID_BTN_PATCH_WRITEBYTES);
+
+        B(hPagePatcher, "STATIC", "2) NOP OUT (replace N bytes with 0x90)",
+          0, 5, 338, 500, 18, 0, hFontSection);
+        B(hPagePatcher, "STATIC", "Bytes:", 0, 5, 364, 50, 22, 0);
+        hEditPatchNopLen = B(hPagePatcher, "EDIT", "2",
+            WS_BORDER|ES_NUMBER, 60, 362, 60, 24, ID_EDIT_PATCH_NOPLEN, hFontMono);
+        B(hPagePatcher, "BUTTON", "NOP Out", 0, 128, 362, 100, 24, ID_BTN_PATCH_NOP);
+
+        B(hPagePatcher, "STATIC", "3) REDIRECT JUMP (short EB or near E9 unconditional)",
+          0, 5, 398, 600, 18, 0, hFontSection);
+        B(hPagePatcher, "STATIC", "Jump-to:", 0, 5, 424, 70, 22, 0);
+        hEditPatchJmpTarget = B(hPagePatcher, "EDIT", "0x0",
+            WS_BORDER|ES_AUTOHSCROLL, 80, 422, 220, 24, ID_EDIT_PATCH_JMPTARGET, hFontMono);
+        B(hPagePatcher, "BUTTON", "Insert Short JMP (2 B)", 0, 308, 422, 170, 24, ID_BTN_PATCH_SHORTJMP);
+        B(hPagePatcher, "BUTTON", "Insert Near JMP (5 B)",  0, 484, 422, 170, 24, ID_BTN_PATCH_NEARJMP);
+
+        B(hPagePatcher, "STATIC", "4) CODE CAVE HOOK (alloc cave, run payload, jmp back)",
+          0, 5, 458, 700, 18, 0, hFontSection);
+        B(hPagePatcher, "STATIC", "Cave size:", 0, 5, 484, 80, 22, 0);
+        hEditPatchCaveSize = B(hPagePatcher, "EDIT", "256",
+            WS_BORDER|ES_NUMBER, 90, 482, 70, 24, ID_EDIT_PATCH_CAVESIZE, hFontMono);
+        B(hPagePatcher, "BUTTON", "Install Code Cave", 0, 168, 482, 150, 24, ID_BTN_PATCH_CAVE);
+        B(hPagePatcher, "STATIC",
+          "Cave installs a 14-byte abs JMP at target, runs your payload (from box 1), "
+          "replays the original bytes, then jumps back. Keep payload register-safe.",
+          0, 325, 486, 950, 16, 0, hFontSmall);
+
+        B(hPagePatcher, "STATIC", "APPLIED PATCHES (click a row, then Restore Selected)",
+          0, 5, 520, 700, 18, 0, hFontSection);
+        B(hPagePatcher, "BUTTON", "Restore Selected", 0, 5, 544, 140, 24, ID_BTN_PATCH_RESTORE);
+        B(hPagePatcher, "BUTTON", "Refresh", 0, 150, 544, 80, 24, ID_BTN_PATCH_REFRESH);
+        hLstPatches = MakeDE(hPagePatcher, 5, 574, 1890, 350, ID_LST_PATCHES);
 
         hStatusWnd=CreateWindowA("STATIC",
             "Ready - type or browse a PID and click Attach.  All panels are selectable: click, Ctrl+A, Ctrl+C.",
@@ -2936,8 +5217,11 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
     }
 
     case WM_TIMER:
-        if(wParam==TIMER_FREEZE&&selectedAddress&&freezeActive&&hProcess&&freezeByteLen>0){
-            WriteProcessMemory(hProcess,selectedAddress,freezeBytes,freezeByteLen,NULL);
+        if(wParam==TIMER_FREEZE){
+            LPVOID addr = GetSelectedAddress();
+            if(addr && freezeActive && hProcess && freezeByteLen>0){
+                WriteProcessMemory(hProcess, addr, freezeBytes, freezeByteLen, NULL);
+            }
         }else if(wParam==TIMER_WATCH){
             RefreshWatchList();
             UpdateOffsetInfo();
@@ -2981,8 +5265,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
     case WM_CTLCOLOREDIT:{
         HDC hdc=(HDC)wParam; HWND hCtrl=(HWND)lParam;
         if(hCtrl==hScanResultsWnd||hCtrl==hMemoryMapWnd||hCtrl==hHexViewWnd||
-           hCtrl==hLstModules||hCtrl==hLstWatchList||hCtrl==hLstCaves||hCtrl==hLstThreads||
-           hCtrl==hLstWindows||hCtrl==hLstDetect){
+            hCtrl==hLstModules||hCtrl==hLstWatchList||hCtrl==hLstCaves||hCtrl==hLstThreads||
+            hCtrl==hLstWindows||hCtrl==hLstDetect||hCtrl==hLstTriggerLog){
             SetBkColor(hdc,CLR_BG_LIST);SetTextColor(hdc,CLR_TEXT_LIST);
             return(LRESULT)hBrushList;
         }
@@ -3008,12 +5292,28 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if(hPageWnd)    SetWindowPos(hPageWnd,   NULL,px,py,pw,ph,SWP_NOZORDER);
             if(hPageDetect) SetWindowPos(hPageDetect,NULL,px,py,pw,ph,SWP_NOZORDER);
             if(hPageShellcode) SetWindowPos(hPageShellcode,NULL,px,py,pw,ph,SWP_NOZORDER);
+            if (hPageVerify) SetWindowPos(hPageVerify, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPageTrigger) SetWindowPos(hPageTrigger, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPagePtrHook) SetWindowPos(hPagePtrHook, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPageExpHnd)  SetWindowPos(hPageExpHnd,  NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPagePatcher) SetWindowPos(hPagePatcher, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hLstVerify)  SetWindowPos(hLstVerify,  NULL, 5, 254, std::max(0,pw-10), std::max(0,ph-260), SWP_NOZORDER);
             if(hLstDetect){
                 int dx = std::max(0,pw-10);
                 int dy = std::max(0,ph-400);
                 SetWindowPos(hLstDetect,NULL,5,130,dx,dy,SWP_NOZORDER);
                 SetWindowPos(hEditDump,NULL,5,ph-240,dx,230,SWP_NOZORDER);
             }
+            if (hLstTriggerLog) {
+                int dx = std::max(0, pw-10);
+                SetWindowPos(hLstTriggerLog, NULL, 5, 100, dx, 200, SWP_NOZORDER);
+            }
+            if (hLstVerify) {
+                int dx = std::max(0, pw - 10);
+                int dy = std::max(0, ph - 280);  
+                SetWindowPos(hLstVerify, NULL, 5, 254, dx, dy, SWP_NOZORDER);
+            }
+
         }
         break;
     }
@@ -3028,6 +5328,11 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             ShowWindow(hPageWnd,    sel==3?SW_SHOW:SW_HIDE);
             ShowWindow(hPageDetect, sel==4?SW_SHOW:SW_HIDE);
             ShowWindow(hPageShellcode, sel==5?SW_SHOW:SW_HIDE);
+            ShowWindow(hPageVerify,    sel == 6 ? SW_SHOW : SW_HIDE);
+            ShowWindow(hPageTrigger,   sel == 7 ? SW_SHOW : SW_HIDE);
+            if (hPagePtrHook) ShowWindow(hPagePtrHook, sel == 8 ? SW_SHOW : SW_HIDE);
+            if (hPageExpHnd)  ShowWindow(hPageExpHnd,  sel == 9 ? SW_SHOW : SW_HIDE);
+            if (hPagePatcher) ShowWindow(hPagePatcher, sel ==10 ? SW_SHOW : SW_HIDE);
         }
         break;
     }
@@ -3048,6 +5353,17 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             LogToStatus("Name search complete - type PID and click Attach, or Browse for dialog");
             break;
         }
+
+        case ID_BTN_USE_LAST_TID:
+            if (g_lastCreatedThreadId != 0) {
+                char buf[32];
+                sprintf_s(buf, "%lu", g_lastCreatedThreadId);
+                SetWindowTextA(hEditApcTid, buf);
+                LogToTrigger("APC TID set from last created thread");
+            } else {
+                LogToTrigger("No thread has been created yet in this session", true);
+            }
+            break;
 
         case ID_BTN_ATTACH:{
             char buf[32];GetWindowTextA(hEditPID,buf,32);
@@ -3079,29 +5395,33 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             scanResults.clear();scanPrevVals.clear();
             UpdateScanCount();
             SetWindowTextA(hStaticAddressInfo,"Selected: None");
-            selectedAddress=NULL;
+            SetSelectedAddress(NULL);
             LogToStatus("Scan results cleared");
             break;
 
         case ID_BTN_EXPORT: ExportScanResults(); break;
 
-        case ID_BTN_PTR_SCAN:
-            if(selectedAddress)ScanForPointers(selectedAddress);
+        case ID_BTN_PTR_SCAN:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr) ScanForPointers(addr);
             else LogToStatus("Select an address first",true);
             break;
+        }
 
         case ID_BTN_COPY_RESULTS: CopyEditToClipboard(hScanResultsWnd); break;
         case ID_BTN_COPY_HEX:     CopyEditToClipboard(hHexViewWnd); break;
 
-        case ID_BTN_COPY_ADDR_CLIP:
-            if(selectedAddress){
-                char buf[32];sprintf_s(buf,"0x%llX",(uintptr_t)selectedAddress);
+        case ID_BTN_COPY_ADDR_CLIP:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr){
+                char buf[32];sprintf_s(buf,"0x%llX",(uintptr_t)addr);
                 if(OpenClipboard(hMainWnd)){EmptyClipboard();
                     HGLOBAL hm=GlobalAlloc(GMEM_MOVEABLE,strlen(buf)+1);
                     if(hm){memcpy(GlobalLock(hm),buf,strlen(buf)+1);GlobalUnlock(hm);SetClipboardData(CF_TEXT,hm);}
                     CloseClipboard();LogToStatus("Address copied to clipboard");}
             }else LogToStatus("No address selected",true);
             break;
+        }
 
         case ID_LST_RESULTS:{
             if(HIWORD(wParam)!=EN_CHANGE)break;
@@ -3113,16 +5433,19 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if(buf[0]!='\0'){
                 trackedOffset=(LONGLONG)strtoull(buf,NULL,0);hasTrackedOffset=true;
                 UpdateOffsetInfo();LogToStatus("Offset tracked");
-            }else if(selectedAddress&&hProcess){
-                LPVOID base=GetBaseAddress();
-                if(base){
-                    trackedOffset=(LONGLONG)(uintptr_t)selectedAddress-(LONGLONG)(uintptr_t)base;
-                    hasTrackedOffset=true;
-                    char s[32];sprintf_s(s,"0x%llX",trackedOffset);
-                    SetWindowTextA(hEditTrackedOffset,s);
-                    UpdateOffsetInfo();LogToStatus("Offset locked from selected address");
-                }
-            }else LogToStatus("Select an address or type an offset value first",true);
+            }else{
+                LPVOID addr = GetSelectedAddress();
+                if(addr && hProcess){
+                    LPVOID base=GetBaseAddress();
+                    if(base){
+                        trackedOffset=(LONGLONG)(uintptr_t)addr-(LONGLONG)(uintptr_t)base;
+                        hasTrackedOffset=true;
+                        char s[32];sprintf_s(s,"0x%llX",trackedOffset);
+                        SetWindowTextA(hEditTrackedOffset,s);
+                        UpdateOffsetInfo();LogToStatus("Offset locked from selected address");
+                    }
+                }else LogToStatus("Select an address or type an offset value first",true);
+            }
             break;
         }
 
@@ -3135,18 +5458,21 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             break;
         }
 
-        case ID_BTN_ADD_WATCH:
-            if(selectedAddress){
-                for(LPVOID a:watchList)if(a==selectedAddress)goto alreadyInWatch;
-                watchList.push_back(selectedAddress);RefreshWatchList();
+        case ID_BTN_ADD_WATCH:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr){
+                for(LPVOID a:watchList)if(a==addr)goto alreadyInWatch;
+                watchList.push_back(addr);RefreshWatchList();
                 LogToStatus("Address added to watch list");
                 alreadyInWatch:;
             }else LogToStatus("Select an address first",true);
             break;
+        }
 
         case ID_BTN_REM_WATCH:{
+            LPVOID addr = GetSelectedAddress();
             for(int i=0;i<(int)watchList.size();i++){
-                if(watchList[i]==selectedAddress){
+                if(watchList[i]==addr){
                     watchList.erase(watchList.begin()+i);RefreshWatchList();break;
                 }
             }
@@ -3158,36 +5484,41 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         case ID_BTN_REFRESH_MODS: PopulateModuleList();LogToStatus("Module list refreshed");break;
 
-        case ID_BTN_READ_VAL:
-            if(selectedAddress){
+        case ID_BTN_READ_VAL:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr){
                 int dt=(int)SendMessage(hCmbDataType,CB_GETCURSEL,0,0);
                 if(dt==DT_STRING){
                     BYTE raw[256]={};SIZE_T r;
-                    ReadProcessMemory(hProcess,selectedAddress,raw,255,&r);raw[255]=0;
+                    ReadProcessMemory(hProcess,addr,raw,255,&r);raw[255]=0;
                     int slen=0;
                     while(slen<(int)r&&raw[slen]>=32&&(unsigned char)raw[slen]<127)slen++;
                     std::string s((char*)raw,slen);
                     SetWindowTextA(hEditNewValue,s.c_str());
-                    char buf[300];sprintf_s(buf,"Read string @ 0x%p: \"%s\"",selectedAddress,s.c_str());
+                    char buf[300];sprintf_s(buf,"Read string @ 0x%p: \"%s\"",addr,s.c_str());
                     LogToStatus(buf);
                 }else{
-                    int v=ReadValueFromAddress(selectedAddress);
+                    int v=ReadValueFromAddress(addr);
                     SetWindowTextA(hEditNewValue,std::to_string(v).c_str());
-                    char buf[128];sprintf_s(buf,"Read 0x%p = %d",selectedAddress,v);LogToStatus(buf);
+                    char buf[128];sprintf_s(buf,"Read 0x%p = %d",addr,v);LogToStatus(buf);
                 }
             }else LogToStatus("Select an address first",true);
             break;
+        }
 
         case ID_BTN_REFRESH_HEX:{
             char buf[64];GetWindowTextA(hEditHexAddress,buf,64);
             LPVOID addr=(LPVOID)(uintptr_t)strtoull(buf,NULL,0);
-            ShowHexAtAddress(addr,selectedAddress);break;
+            LPVOID hilite = GetSelectedAddress();
+            ShowHexAtAddress(addr, hilite);
+            break;
         }
 
         case ID_BTN_REFRESH_MAP: ShowMemoryMap(); break;
 
-        case ID_BTN_WRITE:
-            if(!selectedAddress){LogToStatus("Select an address first",true);break;}
+        case ID_BTN_WRITE:{
+            LPVOID addr = GetSelectedAddress();
+            if(!addr){LogToStatus("Select an address first",true);break;}
             if(!hProcess){LogToStatus("Not attached to a process",true);break;}
             {
                 int dt=(int)SendMessage(hCmbDataType,CB_GETCURSEL,0,0);
@@ -3195,25 +5526,28 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 bool prot=(SendMessage(hChkProtect,BM_GETCHECK,0,0)==BST_CHECKED);
                 bool useSyscall=(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED);
                 if(dt==DT_INT32||dt==DT_FLOAT){
-                    Backup4 bk={};ReadProcessMemory(hProcess,selectedAddress,bk.data,4,NULL);
-                    backups[selectedAddress]=bk;
+                    Backup4 bk={};ReadProcessMemory(hProcess,addr,bk.data,4,NULL);
+                    backups[addr]=bk;
                 }
-                if(WriteTypedValue(selectedAddress,buf,dt,prot,useSyscall)){
-                    char msg[256];sprintf_s(msg,"Wrote %s to 0x%p%s",buf,(void*)selectedAddress, useSyscall?" (syscall)":(prot?" (bypass)":""));
-                    LogToStatus(msg);ShowHexAtAddress(selectedAddress,selectedAddress);
+                if(WriteTypedValue(addr,buf,dt,prot,useSyscall)){
+                    char msg[256];sprintf_s(msg,"Wrote %s to 0x%p%s",buf,(void*)addr, useSyscall?" (syscall)":(prot?" (bypass)":""));
+                    LogToStatus(msg);ShowHexAtAddress(addr,addr);
                     EnableWindow(hBtnUndo,TRUE);
                 } else LogToStatus("Write failed — try Bypass checkbox or run as Admin",true);
             }
             break;
+        }
 
-        case ID_BTN_UNDO:
-            if(selectedAddress&&backups.count(selectedAddress)){
-                WriteProcessMemory(hProcess,selectedAddress,backups[selectedAddress].data,4,NULL);
-                int v=ReadValueFromAddress(selectedAddress);
+        case ID_BTN_UNDO:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr && backups.count(addr)){
+                WriteProcessMemory(hProcess,addr,backups[addr].data,4,NULL);
+                int v=ReadValueFromAddress(addr);
                 SetWindowTextA(hEditNewValue,std::to_string(v).c_str());
-                LogToStatus("Undo successful");ShowHexAtAddress(selectedAddress,selectedAddress);
+                LogToStatus("Undo successful");ShowHexAtAddress(addr,addr);
             }else LogToStatus("No backup available",true);
             break;
+        }
 
         case ID_BTN_INJECT_DLL:  InjectDLL();  break;
         case ID_BTN_EJECT_DLL:   EjectDLL();   break;
@@ -3224,6 +5558,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         case ID_BTN_DETECT_SCAN:  RunInjectionDetection(); break;
         case ID_BTN_DETECT_COPY:  CopyEditToClipboard(hLstDetect); break;
         case ID_BTN_DETECT_CLEAR: ClearEditText(hLstDetect); break;
+        case ID_BTN_ANALYZE_DUMP: AnalyzeDumpShellcode(); break;
         case ID_BTN_DUMP_SELECTED:{
             DWORD start=0, end=0;
             SendMessage(hLstDetect, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
@@ -3295,13 +5630,15 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         case ID_BTN_ASSEMBLER: ShowAssemblerWindow(); break;
 
-        case ID_BTN_SEND_TO_BUILDER:
-            if(selectedAddress){
-                char buf[32];sprintf_s(buf,"0x%llX",(uintptr_t)selectedAddress);
+        case ID_BTN_SEND_TO_BUILDER:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr){
+                char buf[32];sprintf_s(buf,"0x%llX",(uintptr_t)addr);
                 SetWindowTextA(hEditScAddr,buf);
                 LogToStatus("Address sent to Shellcode Builder");
             }else LogToStatus("Select a scan result first",true);
             break;
+        }
 
         case ID_BTN_BUILD_SC: BuildShellcode(); break;
 
@@ -3311,8 +5648,9 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             break;
         }
 
-        case ID_BTN_FREEZE:
-            if(!selectedAddress){LogToStatus("Select an address first",true);break;}
+        case ID_BTN_FREEZE:{
+            LPVOID addr = GetSelectedAddress();
+            if(!addr){LogToStatus("Select an address first",true);break;}
             freezeActive=!freezeActive;
             if(freezeActive){
                 int dt=(int)SendMessage(hCmbDataType,CB_GETCURSEL,0,0);
@@ -3328,15 +5666,31 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 }
                 SetTimer(hWnd,TIMER_FREEZE,50,NULL);
                 SetWindowTextA(hBtnFreeze,"Unfreeze");
-                char msg[128];sprintf_s(msg,"Freezing 0x%p  (%zu bytes)",selectedAddress,freezeByteLen);LogToStatus(msg);
+                char msg[128];sprintf_s(msg,"Freezing 0x%p  (%zu bytes)",addr,freezeByteLen);LogToStatus(msg);
             }else{
                 KillTimer(hWnd,TIMER_FREEZE);SetWindowTextA(hBtnFreeze,"Freeze");LogToStatus("Freeze disabled");
             }
             break;
+        }
 
-        case ID_BTN_WRITE_UTF8:  WriteStringToAddress(selectedAddress,false,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED)); break;
-        case ID_BTN_WRITE_UTF16: WriteStringToAddress(selectedAddress,true,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED));  break;
-        case ID_BTN_READ_STRING: ReadStringAtAddress(selectedAddress);         break;
+        case ID_BTN_WRITE_UTF8:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr) WriteStringToAddress(addr,false,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED));
+            else LogToStatus("No address selected",true);
+            break;
+        }
+        case ID_BTN_WRITE_UTF16:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr) WriteStringToAddress(addr,true,(SendMessage(hChkSyscall,BM_GETCHECK,0,0)==BST_CHECKED));
+            else LogToStatus("No address selected",true);
+            break;
+        }
+        case ID_BTN_READ_STRING:{
+            LPVOID addr = GetSelectedAddress();
+            if(addr) ReadStringAtAddress(addr);
+            else LogToStatus("No address selected",true);
+            break;
+        }
 
         case ID_BTN_AOB_PATCH: DoAobPatchReplace(); break;
 
@@ -3383,6 +5737,48 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         case ID_BTN_SUSPEND_THR:SuspendResumeProcess(true);  break;
         case ID_BTN_RESUME_THR: SuspendResumeProcess(false); break;
         case ID_BTN_KILL_THREAD:KillSelectedThread(); break;
+        case ID_BTN_COPY_TID_TO_APC:
+            {
+                int selStart = 0, selEnd = 0;
+                SendMessage(hLstThreads, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                if (selStart == selEnd) {
+                    LogToStatus("No thread selected – click a line in the thread list first", true);
+                    break;
+                }
+                int lineIdx = (int)SendMessage(hLstThreads, EM_LINEFROMCHAR, (WPARAM)selStart, 0);
+                int lineStart = (int)SendMessage(hLstThreads, EM_LINEINDEX, (WPARAM)lineIdx, 0);
+                int lineLen = (int)SendMessage(hLstThreads, EM_LINELENGTH, (WPARAM)lineStart, 0);
+                if (lineLen <= 0 || lineLen >= 256) {
+                    LogToStatus("Invalid line length", true);
+                    break;
+                }
+                std::string buf(lineLen + 2, '\0');
+                buf[0] = (char)(lineLen & 0xFF);
+                buf[1] = (char)((lineLen >> 8) & 0xFF);
+                SendMessageA(hLstThreads, EM_GETLINE, (WPARAM)lineIdx, (LPARAM)&buf[0]);
+        
+                const char* p = strstr(buf.c_str(), "TID: ");
+                if (!p) {
+                    LogToStatus("Could not parse TID from line", true);
+                    break;
+                }
+                DWORD tid = (DWORD)atoi(p + 5);
+                if (tid == 0) {
+                    LogToStatus("Invalid TID", true);
+                    break;
+                }
+        
+                char tidStr[32];
+                sprintf_s(tidStr, "%lu", tid);
+                SetWindowTextA(hEditApcTid, tidStr);
+        
+                char msg[128];
+                sprintf_s(msg, "Copied TID %lu to APC field", tid);
+                LogToStatus(msg);
+        
+                TabCtrl_SetCurSel(hTabCtrl, 7);  
+            }
+            break;
         case ID_BTN_CAVE_INJECT:InjectIntoCodeCave(); break;
 
         case ID_BTN_WND_FOCUS:
@@ -3588,34 +5984,95 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         case ID_BTN_HELP_INJECT:
             MessageBoxA(hWnd,
-                "=== CODE INJ TAB ===\n\n"
-                "[SHELLCODE INJ]\n"
-                "1. Write or paste your shellcode as hex bytes, e.g.: 90 90 C3\n"
-                "2. Choose memory protection: RWX (write+exec) or RX (exec only).\n"
-                "3. Click 'Load .bin File' to load raw binary from disk.\n"
-                "4. Click 'Alloc + Execute' – allocates memory, writes shellcode, creates a remote thread.\n\n"
-                "[SHELLCODE BUILDER]\n"
-                "  * Quickly generate common x64/x86 shellcode patterns:\n"
-                "    - Set value (mov dword [addr], val)\n"
-                "    - Add value\n"
-                "    - Subtract value\n"
-                "    - Zero out\n"
-                "    - NOP sled\n"
-                "  * Enter target address and value, select arch, click Build.\n"
-                "  * Copy the generated hex to the inj field.\n\n"
-                "[OPEN ASSEMBLER] – Opens a separate window to write Intel syntax assembly\n"
-                "  and convert it directly to shellcode bytes.\n\n"
-                "[CODE CAVE SCANNER]\n"
-                "  * Scans for regions of 0x00 or 0x90 bytes (candidate caves).\n"
-                "  * Set minimum size, click Scan Caves.\n"
-                "  * Select a cave from the list, then click 'Inject SC to Cave' to write\n"
-                "    the current shellcode into that cave and execute it.\n\n"
-                "[REMOTE THREADS]\n"
-                "  * List all threads in the target process with their start addresses.\n"
-                "  * Select a thread and click 'Kill Selected' to terminate it.\n"
-                "  * Use 'Suspend Threads' / 'Resume Threads' to pause/resume all threads of the process.\n\n"
-                "⚠️ Improper shellcode can crash the target. Test in a safe environment first.",
-                "Code Inj Help", MB_OK | MB_ICONINFORMATION);
+                "=== CODE INJECTION TAB  ─  Full Reference ===\r\n"
+                "\r\n"
+                "━━━━━  SHELLCODE INJECTION  ━━━━━\r\n"
+                "\r\n"
+                "What it does:\r\n"
+                "  Allocates a new RWX (or RX) memory region inside the target process,\r\n"
+                "  copies your hex bytes into it, then starts a new remote thread there.\r\n"
+                "\r\n"
+                "Steps:\r\n"
+                "  1. Paste your shellcode as space-separated hex bytes:\r\n"
+                "       90 90 C3          (two NOPs then RET – safe smoke-test)\r\n"
+                "       48 C7 00 39 05 00 00 C3  (write 1337 to [rax], then ret)\r\n"
+                "  2. Or click 'Load .bin File' to import a raw binary file.\r\n"
+                "  3. Choose protection:\r\n"
+                "       RWX – writable and executable (easier, more detectable)\r\n"
+                "       RX  – read+execute only (write first, protect before running)\r\n"
+                "  4. Click 'Alloc + Execute'.\r\n"
+                "  5. Switch to the Verify tab and click Run All to confirm execution.\r\n"
+                "\r\n"
+                "Common problems:\r\n"
+                "  • Shellcode crashes the target  → add a RET (C3) at the end.\r\n"
+                "  • Thread exits immediately      → check you aren't calling APIs that\r\n"
+                "                                    need initialised stack (add sub rsp,0x28).\r\n"
+                "  • Write fails                   → run as Administrator.\r\n"
+                "\r\n"
+                "━━━━━  SHELLCODE BUILDER  ━━━━━\r\n"
+                "\r\n"
+                "Generates small x64/x86 stubs for common memory-write patterns.\r\n"
+                "  Ops:  Set value · Add · Subtract · Zero out · NOP sled\r\n"
+                "  1. Enter target address (copy from scan results or type it).\r\n"
+                "  2. Enter the integer value to write.\r\n"
+                "  3. Select architecture (x64 / x86).\r\n"
+                "  4. Click Build → hex appears in the result field.\r\n"
+                "  5. Click '-> SC Field' to send it to the injection box above.\r\n"
+                "\r\n"
+                "━━━━━  OPEN ASSEMBLER  ━━━━━\r\n"
+                "\r\n"
+                "Writes Intel-syntax x64 assembly and converts it to shellcode bytes.\r\n"
+                "  • Supports: mov, lea, push/pop, add/sub/xor/cmp, inc/dec,\r\n"
+                "    shl/shr, mul/div, call/jmp (register), test, xchg, nop, ret.\r\n"
+                "  • Comments start with ';'.\r\n"
+                "  • Click Assemble → bytes appear → Send to SC Field.\r\n"
+                "\r\n"
+                "━━━━━  CODE CAVE SCANNER  ━━━━━\r\n"
+                "\r\n"
+                "Finds runs of 0x00 or 0x90 bytes inside the target (unused space).\r\n"
+                "  1. Set minimum size (bytes). 32 is a safe minimum.\r\n"
+                "  2. Click Scan Caves.\r\n"
+                "  3. Click a cave line in the list (note RWX caves are best).\r\n"
+                "  4. Put your shellcode in the hex field above.\r\n"
+                "  5. Click 'Inject SC to Cave' – writes bytes there without allocating\r\n"
+                "     new memory (harder to detect than VirtualAllocEx).\r\n"
+                "  6. Use the Shellcode Exec tab to trigger the cave address.\r\n"
+                "\r\n"
+                "━━━━━  REMOTE THREADS  ━━━━━\r\n"
+                "\r\n"
+                "  • List Threads   – shows TID, priorities, and start address for every\r\n"
+                "                     thread in the attached process.\r\n"
+                "  • Kill Selected  – terminates the selected thread (TerminateThread).\r\n"
+                "                     WARNING: killing the main thread crashes the process.\r\n"
+                "  • Suspend/Resume – freezes or thaws ALL threads (useful for breakpointing\r\n"
+                "                     before a write then resuming after).\r\n"
+                "\r\n"
+                "━━━━━  DLL INJECTION  (on the Modules & DLL tab)  ━━━━━\r\n"
+                "\r\n"
+                "Method: LoadLibraryA via CreateRemoteThread.\r\n"
+                "  1. Enter the FULL path to the DLL  (e.g. C:\\tools\\myhook.dll).\r\n"
+                "     Or click Browse to choose it.\r\n"
+                "  2. Click 'Inject DLL (LoadLibraryA)'.\r\n"
+                "  3. The Modules list refreshes – your DLL should appear there.\r\n"
+                "  4. If not, check:\r\n"
+                "       • Architecture mismatch (x86 DLL into x64 process, or vice versa)\r\n"
+                "       • DLL or its dependencies not found (use Dependency Walker)\r\n"
+                "       • DllMain returned FALSE\r\n"
+                "       • Missing admin rights\r\n"
+                "\r\n"
+                "To eject:  click the module line in the list → Eject Selected.\r\n"
+                "  Only works if the DLL was dynamically loaded; static imports cannot\r\n"
+                "  be safely ejected this way.\r\n"
+                "\r\n"
+                "━━━━━  TIPS  ━━━━━\r\n"
+                "\r\n"
+                "  • Use the Verify tab to confirm any injection actually took effect.\r\n"
+                "  • Enable 'Use syscall write' in the scanner tab to bypass user-land\r\n"
+                "    hooks on WriteProcessMemory when writing values.\r\n"
+                "  • Always test shellcode in a disposable VM before targeting real software.\r\n"
+                "  • Run as Administrator for full access rights.\r\n",
+                "Code Injection / DLL Help",
+                MB_OK | MB_ICONINFORMATION);
             break;
 
         case ID_BTN_HELP_WNDWRITER:
@@ -3671,11 +6128,152 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 "to trigger it repeatedly or by different methods.",
                 "Shellcode Exec Help", MB_OK | MB_ICONINFORMATION);
             break;
+        case ID_BTN_TRIGGER: TriggerShellcode(); break;
+        case ID_BTN_TRIGGER_CLEAR_LOG: ClearEditText(hLstTriggerLog); break;
+        case ID_BTN_READ_OUTPUT: {
+            char addrStr[64] = {0}, sizeStr[32] = {0};
+            GetWindowTextA(hEditOutputAddr, addrStr, 64);
+            GetWindowTextA(hEditOutputSize, sizeStr, 32);
+            uintptr_t outAddr = (uintptr_t)strtoull(addrStr, nullptr, 0);
+            DWORD outSize = (DWORD)strtoul(sizeStr, nullptr, 0);
+            if (!outAddr || outSize == 0 || outSize > 4096) {
+                LogToTrigger("Invalid output address or size (max 4096)", true);
+                break;
+            }
+            std::vector<BYTE> buf(outSize);
+            SIZE_T read = 0;
+            if (ReadProcessMemory(hProcess, (LPCVOID)outAddr, buf.data(), outSize, &read) && read > 0) {
+                char hex[8192] = "Output buffer:\n";
+                for (DWORD i = 0; i < read; i++) {
+                    char t[8];
+                    sprintf_s(t, "%02X ", buf[i]);
+                    strcat_s(hex, t);
+                    if ((i + 1) % 16 == 0) strcat_s(hex, "\n");
+                }
+                LogToTrigger(hex);
+            } else {
+                LogToTrigger("Failed to read output buffer", true);
+            }
+            break;
+        }
+        case ID_BTN_CHECK_SENTINEL2:  ClearEditText(hLstVerify); VerifyCheckSentinel(); break;
+        case ID_BTN_SNAPSHOT_VERIFY: TakeVerifySnapshot(); break;
+        case ID_BTN_CHECK_VALUES:    ClearEditText(hLstVerify); VerifyCheckValues();   break;
+        case ID_BTN_CHECK_MODULES:   ClearEditText(hLstVerify); VerifyCheckModules();  break;
+        case ID_BTN_CHECK_THREADS:   ClearEditText(hLstVerify); VerifyCheckThreads();  break;
+        case ID_BTN_CHECK_MEMORY:    ClearEditText(hLstVerify); VerifyCheckMemory();   break;
+        case ID_BTN_CHECK_SENTINEL:  ClearEditText(hLstVerify); VerifyCheckSentinel(); break;
+        case ID_BTN_VERIFY_ALL:      RunVerifyAll(); break;
+
+        case ID_BTN_CHAIN_ADD:     AddChainFromUI(); break;
+        case ID_BTN_CHAIN_DEL:     DeleteSelectedChain(); break;
+        case ID_BTN_CHAIN_RESOLVE: ResolveChainToSelected(); break;
+        case ID_BTN_CHAIN_REFRESH: RefreshChainsUI(); LogToStatus("Chains refreshed"); break;
+        case ID_BTN_CHAIN_SAVE:    SaveChainsToFile(); break;
+        case ID_BTN_CHAIN_LOAD:    LoadChainsFromFile(); break;
+
+        case ID_BTN_CALLGRAPH: TraceCallGraph(); break;
+
+        
+        case ID_BTN_HOOK_INSTALL: InstallTrampolineHook(); break;
+        case ID_BTN_HOOK_RESTORE: RestoreSelectedHook();   break;
+        case ID_BTN_HOOK_REFRESH: RefreshHooksUI(); LogToStatus("Hook list refreshed"); break;
+        case ID_BTN_HOOK_HELP:
+            MessageBoxA(hWnd,
+                "=== TRAMPOLINE HOOK BUILDER ===\r\n\r\n"
+                "WHAT IT DOES\r\n"
+                "  Detours a function in the target process to your shellcode, runs your\r\n"
+                "  code, then returns to the original function so it continues normally.\r\n\r\n"
+                "HOW IT WORKS\r\n"
+                "  1. Reads 14 bytes from the target address (your hook site).\r\n"
+                "  2. Allocates an RWX trampoline buffer in the target process.\r\n"
+                "  3. Lays out the trampoline as:\r\n"
+                "        [ your shellcode ] [ original 14 bytes ] [ 14-byte abs JMP back ]\r\n"
+                "  4. Overwrites the target with a 14-byte absolute JMP to the trampoline.\r\n"
+                "  5. When execution hits the target -> jumps into your shellcode -> runs\r\n"
+                "     the original 14 bytes -> jumps back to (target + 14) and continues.\r\n\r\n"
+                "HOW TO USE\r\n"
+                "  1. Find a function start (or any safe spot 14+ bytes long) - use the\r\n"
+                "     Export Browser tab to grab a real function address.\r\n"
+                "  2. Paste it into 'Target'.\r\n"
+                "  3. Write your shellcode in hex (e.g. assemble it via the Assembler\r\n"
+                "     window then 'Send to SC Field' - but paste it here instead).\r\n"
+                "     IMPORTANT: your shellcode must preserve any registers it touches.\r\n"
+                "     A safe template is:\r\n"
+                "        50          push rax\r\n"
+                "        51          push rcx\r\n"
+                "        ... your code ...\r\n"
+                "        59          pop  rcx\r\n"
+                "        58          pop  rax\r\n"
+                "  4. Click 'Install Hook'. Verify in Verify tab afterwards.\r\n"
+                "  5. To revert: select the hook line, click 'Restore Selected'.\r\n\r\n"
+                "CAVEATS\r\n"
+                "  * The 14 bytes you overwrite MUST start on an instruction boundary or\r\n"
+                "    the original-bytes splice in the trampoline will execute garbage.\r\n"
+                "  * If the original bytes contain rip-relative instructions, those will\r\n"
+                "    break when relocated to the trampoline. Prefer hooking function\r\n"
+                "    prologs that start with mov/push/sub-rsp.\r\n"
+                "  * Always test on a disposable process before real targets.",
+                "Trampoline Hook Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case ID_BTN_EXP_REFRESH: EnumerateExports(); break;
+        case ID_BTN_EXP_FILTER:  RefreshExportsUI(); break;
+        case ID_BTN_EXP_GOTO:    GoToSelectedExport(); break;
+
+        case ID_BTN_HND_REFRESH: EnumerateHandles(); break;
+        case ID_BTN_HND_FILTER:  RefreshHandlesUI(); break;
+
+        case ID_BTN_PATCH_READ:       PatcherReadAndShow();      break;
+        case ID_BTN_PATCH_DISASM:     PatcherDisassembleAtAddr();break;
+        case ID_BTN_PATCH_WRITEBYTES: PatcherWriteRawBytes();    break;
+        case ID_BTN_PATCH_NOP:        PatcherNopOut();           break;
+        case ID_BTN_PATCH_SHORTJMP:   PatcherShortJmp();         break;
+        case ID_BTN_PATCH_NEARJMP:    PatcherNearJmp();          break;
+        case ID_BTN_PATCH_CAVE:       PatcherInstallCodeCave();  break;
+        case ID_BTN_PATCH_RESTORE:    PatcherRestoreSelected();  break;
+        case ID_BTN_PATCH_REFRESH:    PatcherRefreshList();      break;
+        case ID_BTN_PATCH_HELP:
+            MessageBoxA(hWnd,
+                "BINARY PATCHER\r\n"
+                "==============\r\n\r\n"
+                "Patches the memory of the currently attached process. Every\r\n"
+                "modification saves the original bytes so it can be reverted with\r\n"
+                "'Restore Selected'. Page protection is automatically flipped to\r\n"
+                "RWX during the write and restored afterwards, and the icache is\r\n"
+                "flushed so the CPU sees the new bytes.\r\n\r\n"
+                "1) WRITE RAW BYTES\r\n"
+                "   Replace N bytes at target with literal bytes you type.\r\n"
+                "   Example: write '90 90' to NOP a two-byte conditional jump.\r\n\r\n"
+                "2) NOP OUT\r\n"
+                "   Replace N bytes with 0x90 (single-byte NOP). Useful for killing\r\n"
+                "   anti-disasm jumps like 7F FF / 75 FF that target an opcode byte.\r\n\r\n"
+                "3) REDIRECT JUMP\r\n"
+                "   Short (EB rel8, 2 bytes, +/-127) or Near (E9 rel32, 5 bytes,\r\n"
+                "   +/-2 GB). Replaces the bytes at 'Target addr' with an\r\n"
+                "   unconditional jump to 'Jump-to'. If the original instruction\r\n"
+                "   was longer than the new jump, the trailing bytes become NOP-\r\n"
+                "   slide candidates - pad them with the Write/NOP tools first.\r\n\r\n"
+                "4) CODE CAVE HOOK\r\n"
+                "   Allocates RWX memory in the process, copies the payload bytes\r\n"
+                "   you typed into box 1, then the original 14 bytes from the\r\n"
+                "   target, then a 14-byte absolute JMP back to (target+14). The\r\n"
+                "   target itself is overwritten with a 14-byte abs JMP into the\r\n"
+                "   cave. Your payload must preserve any registers it clobbers\r\n"
+                "   (push/pop) - it runs in the middle of the original function.\r\n\r\n"
+                "TIP: To safely modify code that contains anti-disasm 7F FF style\r\n"
+                "jumps, first 'Read Bytes' to see the layout, then either NOP the\r\n"
+                "junk jumps, or jump out to a code cave where you have free space\r\n"
+                "to write whatever bytes you want executed.",
+                "Binary Patcher Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case WM_LBUTTONUP: break;
 
         }
         break;
+    
 
-    case WM_LBUTTONUP: break;
 
     case WM_DESTROY:
         KillTimer(hWnd,TIMER_FREEZE);KillTimer(hWnd,TIMER_WATCH);KillTimer(hWnd,TIMER_HEALTH);
