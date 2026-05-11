@@ -183,6 +183,15 @@ struct PointerChain {
 };
 static std::vector<PointerChain> g_chains;
 
+struct AutoPtrScanResult {
+    std::string moduleName;
+    uintptr_t   moduleBase = 0;
+    uintptr_t   baseOff    = 0;
+    std::vector<intptr_t> offsets;
+    uintptr_t   resolved   = 0;
+};
+static std::vector<AutoPtrScanResult> g_lastAutoPtrScan;
+
 
 struct HookRecord {
     LPVOID            target = nullptr;
@@ -348,6 +357,16 @@ static std::vector<HandleInfoEntry> g_handles;
 #define ID_BTN_PATCH_REFRESH     987
 #define ID_BTN_PATCH_HELP        988
 
+#define ID_EDIT_APS_TARGET      1000
+#define ID_EDIT_APS_DEPTH       1001
+#define ID_EDIT_APS_MAXOFF      1002
+#define ID_BTN_APS_SCAN         1003
+#define ID_LST_APS_RESULTS      1004
+#define ID_BTN_APS_ADDCHAIN     1005
+#define ID_BTN_APS_CLEAR        1006
+#define ID_BTN_APS_USE_SELECTED 1007
+#define ID_BTN_APS_HELP         1008
+
 #define DT_INT32  0
 #define DT_INT16  1
 #define DT_INT8   2
@@ -433,6 +452,10 @@ HWND hEditPatchAddr = NULL, hEditPatchSize = NULL, hEditPatchBytes = NULL;
 HWND hEditPatchDisasm = NULL, hEditPatchPayload = NULL;
 HWND hEditPatchNopLen = NULL, hEditPatchJmpTarget = NULL, hEditPatchCaveSize = NULL;
 HWND hLstPatches = NULL;
+
+HWND hPageAutoPtr = NULL;
+HWND hEditApsTarget = NULL, hEditApsDepth = NULL, hEditApsMaxOff = NULL;
+HWND hLstApsResults = NULL;
 
 HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd, hPageDetect, hPageShellcode;
 
@@ -579,6 +602,8 @@ void PatcherNearJmp();
 void PatcherInstallCodeCave();
 void PatcherRestoreSelected();
 void PatcherRefreshList();
+void RunAutoPointerScan();
+void AddAutoPtrScanToChains();
 static int DisasmOne(const BYTE* b, size_t left, uint64_t rva, char* out, size_t outSz);
 
 
@@ -2284,12 +2309,153 @@ static std::string AssembleLine(const std::string& rawLine,std::vector<BYTE>& ou
 }
 
 static std::string AssembleSource(const char* src){
-    std::vector<BYTE> bytes;std::istringstream ss(src);std::string line;int ln=0;
-    while(std::getline(ss,line)){ln++;std::string err=AssembleLine(line,bytes);if(!err.empty())return"Line "+std::to_string(ln)+": "+err;}
-    if(bytes.empty())return"ERROR: nothing assembled";
+    std::vector<BYTE> bytes;
+    std::map<std::string,size_t> labels;
+    struct Fixup { size_t patchOff; std::string label; bool isLong; size_t insEnd; };
+    std::vector<Fixup> fixups;
+
+    auto isLabelName = [](const std::string& s)->bool{
+        if (s.empty()) return false;
+        if (isdigit((unsigned char)s[0])) return false;
+        if (s[0]=='-'||s[0]=='+') return false;
+        if (s.size()>=2 && s[0]=='0' && (s[1]=='x'||s[1]=='X')) return false;
+        int n; bool w;
+        if (AsmFindReg(AsmToLow(s), n, w)) return false;
+        if (s.find('[')!=std::string::npos) return false;
+        for (char c : s)
+            if (!(isalnum((unsigned char)c)||c=='_'||c=='.'||c=='@'||c=='$')) return false;
+        return true;
+    };
+
+    static const struct { const char* mn; BYTE opLong; } kJcc[] = {
+        {"jo",0x80},  {"jno",0x81},
+        {"jb",0x82},  {"jnae",0x82}, {"jc",0x82},
+        {"jnb",0x83}, {"jae",0x83},  {"jnc",0x83},
+        {"jz",0x84},  {"je",0x84},
+        {"jnz",0x85}, {"jne",0x85},
+        {"jbe",0x86}, {"jna",0x86},
+        {"ja",0x87},  {"jnbe",0x87},
+        {"js",0x88},  {"jns",0x89},
+        {"jp",0x8A},  {"jpe",0x8A},
+        {"jnp",0x8B}, {"jpo",0x8B},
+        {"jl",0x8C},  {"jnge",0x8C},
+        {"jnl",0x8D}, {"jge",0x8D},
+        {"jle",0x8E}, {"jng",0x8E},
+        {"jg",0x8F},  {"jnle",0x8F},
+        {nullptr,0}
+    };
+
+    std::istringstream ss(src); std::string line; int ln=0;
+    while (std::getline(ss, line)) {
+        ln++;
+        std::string trimmed = AsmTrimLine(line);
+        if (trimmed.empty()) continue;
+
+        if (trimmed.back() == ':') {
+            std::string name = trimmed.substr(0, trimmed.size()-1);
+            while (!name.empty() && (name.back()==' '||name.back()=='\t')) name.pop_back();
+            if (!isLabelName(name))
+                return "Line "+std::to_string(ln)+": invalid label '"+name+"'";
+            if (labels.count(name))
+                return "Line "+std::to_string(ln)+": duplicate label '"+name+"'";
+            labels[name] = bytes.size();
+            continue;
+        }
+
+        std::string low = AsmToLow(trimmed);
+        size_t sp = low.find_first_of(" \t");
+        std::string mn = sp!=std::string::npos ? low.substr(0,sp) : low;
+        std::string opsRaw = sp!=std::string::npos ? AsmTrimLine(trimmed.substr(sp+1)) : "";
+
+        if ((mn == "db" || mn == "dw" || mn == "dd" || mn == "dq") && !opsRaw.empty()) {
+            int unit = (mn=="db")?1:(mn=="dw")?2:(mn=="dd")?4:8;
+            size_t p = 0;
+            const std::string& s = opsRaw;
+            while (p < s.size()) {
+                while (p < s.size() && (s[p]==' '||s[p]=='\t'||s[p]==',')) p++;
+                if (p >= s.size()) break;
+                if (s[p]=='\''||s[p]=='"') {
+                    char q = s[p++];
+                    while (p < s.size() && s[p] != q) {
+                        BYTE v = (BYTE)s[p++];
+                        for (int b = 0; b < unit; b++) bytes.push_back(b==0?v:0);
+                    }
+                    if (p < s.size()) p++;
+                } else {
+                    size_t end = p;
+                    while (end < s.size() && s[end]!=','&&s[end]!=' '&&s[end]!='\t') end++;
+                    std::string tok = s.substr(p, end-p);
+                    uint64_t v = strtoull(tok.c_str(), nullptr, 0);
+                    for (int b = 0; b < unit; b++) bytes.push_back((BYTE)((v >> (b*8)) & 0xFF));
+                    p = end;
+                }
+            }
+            continue;
+        }
+
+        bool handled = false;
+        for (int i = 0; kJcc[i].mn; i++) {
+            if (mn != kJcc[i].mn) continue;
+            if (!isLabelName(opsRaw)) break;
+            bytes.push_back(0x0F); bytes.push_back(kJcc[i].opLong);
+            Fixup fx; fx.patchOff = bytes.size(); fx.label = opsRaw; fx.isLong = true;
+            for (int b = 0; b < 4; b++) bytes.push_back(0);
+            fx.insEnd = bytes.size();
+            fixups.push_back(fx);
+            handled = true;
+            break;
+        }
+        if (handled) continue;
+
+        if ((mn == "jmp" || mn == "call") && isLabelName(opsRaw)) {
+            bytes.push_back(mn=="jmp" ? 0xE9 : 0xE8);
+            Fixup fx; fx.patchOff = bytes.size(); fx.label = opsRaw; fx.isLong = true;
+            for (int b = 0; b < 4; b++) bytes.push_back(0);
+            fx.insEnd = bytes.size();
+            fixups.push_back(fx);
+            continue;
+        }
+
+        if ((mn=="loop"||mn=="loope"||mn=="loopz"||mn=="loopne"||mn=="loopnz"||
+             mn=="jrcxz"||mn=="jecxz") && isLabelName(opsRaw)) {
+            BYTE opc = (mn=="loopne"||mn=="loopnz")?0xE0:
+                       (mn=="loope"||mn=="loopz")  ?0xE1:
+                       (mn=="loop")                ?0xE2:0xE3;
+            bytes.push_back(opc);
+            Fixup fx; fx.patchOff = bytes.size(); fx.label = opsRaw; fx.isLong = false;
+            bytes.push_back(0);
+            fx.insEnd = bytes.size();
+            fixups.push_back(fx);
+            continue;
+        }
+
+        std::string err = AssembleLine(trimmed, bytes);
+        if (!err.empty()) return "Line "+std::to_string(ln)+": "+err;
+    }
+
+    for (auto& fx : fixups) {
+        auto it = labels.find(fx.label);
+        if (it == labels.end()) return "Unresolved label '" + fx.label + "'";
+        int64_t rel = (int64_t)it->second - (int64_t)fx.insEnd;
+        if (fx.isLong) {
+            if (rel < INT32_MIN || rel > INT32_MAX)
+                return "rel32 out of range for label '" + fx.label + "'";
+            int32_t r32 = (int32_t)rel;
+            for (int b = 0; b < 4; b++) bytes[fx.patchOff + b] = (BYTE)((r32 >> (b*8)) & 0xFF);
+        } else {
+            if (rel < -128 || rel > 127)
+                return "rel8 out of range for label '" + fx.label + "' (loop/jrcxz cannot be widened)";
+            bytes[fx.patchOff] = (BYTE)(int8_t)rel;
+        }
+    }
+
+    if (bytes.empty()) return "ERROR: nothing assembled";
     std::string result;
-    for(size_t i=0;i<bytes.size();i++){char h[4];sprintf_s(h,"%02X ",bytes[i]);result+=h;}
-    if(!result.empty())result.pop_back();return result;
+    for (size_t i = 0; i < bytes.size(); i++) {
+        char h[4]; sprintf_s(h, "%02X ", bytes[i]); result += h;
+    }
+    if (!result.empty()) result.pop_back();
+    return result;
 }
 
 LRESULT CALLBACK AsmWndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
@@ -3922,6 +4088,170 @@ void TraceCallGraph() {
 }
 
 
+static bool RelocateInstructions(const BYTE* orig, size_t origLen,
+                                 uintptr_t origRip, uintptr_t newRip,
+                                 std::vector<BYTE>& out, std::string& err) {
+    static ZydisDecoder s_dec;
+    static bool s_init = false;
+    if (!s_init) {
+        if (!ZYAN_SUCCESS(ZydisDecoderInit(&s_dec,
+                ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+            err = "Zydis decoder init failed"; return false;
+        }
+        s_init = true;
+    }
+    out.clear();
+    size_t pos = 0;
+    while (pos < origLen) {
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&s_dec,
+                orig + pos, origLen - pos, &ins, ops))) {
+            char e[96]; sprintf_s(e, "decode failed at +%zu", pos);
+            err = e; return false;
+        }
+        uintptr_t insOrigRip = origRip + pos;
+        uintptr_t insNewRip  = newRip  + out.size();
+        uintptr_t origNextRip = insOrigRip + ins.length;
+
+        bool hasRipMem = false, hasRelImm = false;
+        int64_t origTargetAbs = 0;
+        ZyanU8 ripMemDispOffset = 0, ripMemDispSize = 0;
+        for (int i = 0; i < ins.operand_count; i++) {
+            if (ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                ops[i].mem.base == ZYDIS_REGISTER_RIP) {
+                hasRipMem = true;
+                origTargetAbs = (int64_t)origNextRip + ops[i].mem.disp.value;
+                ripMemDispOffset = ins.raw.disp.offset;
+                ripMemDispSize   = ins.raw.disp.size;
+                break;
+            }
+            if (ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && ops[i].imm.is_relative) {
+                hasRelImm = true;
+                origTargetAbs = (int64_t)origNextRip + ops[i].imm.value.s;
+                break;
+            }
+        }
+
+        if (!hasRipMem && !hasRelImm) {
+            for (size_t k = 0; k < ins.length; k++) out.push_back(orig[pos + k]);
+            pos += ins.length; continue;
+        }
+
+        if (hasRipMem) {
+            int64_t newDisp = origTargetAbs - (int64_t)(insNewRip + ins.length);
+            if (newDisp < INT32_MIN || newDisp > INT32_MAX) {
+                err = "rip-rel memory disp out of range (trampoline too far)"; return false;
+            }
+            if (ripMemDispSize != 32) {
+                err = "unexpected rip-rel disp size"; return false;
+            }
+            size_t outBase = out.size();
+            for (size_t k = 0; k < ins.length; k++) out.push_back(orig[pos + k]);
+            int32_t r32 = (int32_t)newDisp;
+            for (int b = 0; b < 4; b++)
+                out[outBase + ripMemDispOffset + b] = (BYTE)((r32 >> (b*8)) & 0xFF);
+        } else {
+            BYTE first  = orig[pos];
+            BYTE second = (ins.length > 1) ? orig[pos+1] : 0;
+            if ((first == 0xE8 || first == 0xE9) && ins.length == 5) {
+                int64_t newDisp = origTargetAbs - (int64_t)(insNewRip + 5);
+                if (newDisp >= INT32_MIN && newDisp <= INT32_MAX) {
+                    out.push_back(first);
+                    int32_t r32 = (int32_t)newDisp;
+                    for (int b = 0; b < 4; b++) out.push_back((BYTE)((r32 >> (b*8)) & 0xFF));
+                } else if (first == 0xE9) {
+                    out.push_back(0xFF); out.push_back(0x25);
+                    out.push_back(0); out.push_back(0); out.push_back(0); out.push_back(0);
+                    uintptr_t t = (uintptr_t)origTargetAbs;
+                    for (int b = 0; b < 8; b++) out.push_back((BYTE)((t >> (b*8)) & 0xFF));
+                } else {
+                    out.push_back(0xFF); out.push_back(0x15);
+                    out.push_back(0x02); out.push_back(0); out.push_back(0); out.push_back(0);
+                    out.push_back(0xEB); out.push_back(0x08);
+                    uintptr_t t = (uintptr_t)origTargetAbs;
+                    for (int b = 0; b < 8; b++) out.push_back((BYTE)((t >> (b*8)) & 0xFF));
+                }
+            } else if (first == 0x0F && (second >= 0x80 && second <= 0x8F) && ins.length == 6) {
+                int64_t newDisp = origTargetAbs - (int64_t)(insNewRip + 6);
+                if (newDisp < INT32_MIN || newDisp > INT32_MAX) {
+                    err = "long Jcc rel32 out of range"; return false;
+                }
+                out.push_back(0x0F); out.push_back(second);
+                int32_t r32 = (int32_t)newDisp;
+                for (int b = 0; b < 4; b++) out.push_back((BYTE)((r32 >> (b*8)) & 0xFF));
+            } else if ((first >= 0x70 && first <= 0x7F) && ins.length == 2) {
+                int64_t shortDisp = origTargetAbs - (int64_t)(insNewRip + 2);
+                if (shortDisp >= -128 && shortDisp <= 127) {
+                    out.push_back(first); out.push_back((BYTE)(int8_t)shortDisp);
+                } else {
+                    int64_t longDisp = origTargetAbs - (int64_t)(insNewRip + 6);
+                    if (longDisp < INT32_MIN || longDisp > INT32_MAX) {
+                        err = "Jcc rel8 cannot be relocated"; return false;
+                    }
+                    out.push_back(0x0F); out.push_back(first + 0x10);
+                    int32_t r32 = (int32_t)longDisp;
+                    for (int b = 0; b < 4; b++) out.push_back((BYTE)((r32 >> (b*8)) & 0xFF));
+                }
+            } else if (first == 0xEB && ins.length == 2) {
+                int64_t shortDisp = origTargetAbs - (int64_t)(insNewRip + 2);
+                if (shortDisp >= -128 && shortDisp <= 127) {
+                    out.push_back(0xEB); out.push_back((BYTE)(int8_t)shortDisp);
+                } else {
+                    int64_t longDisp = origTargetAbs - (int64_t)(insNewRip + 5);
+                    if (longDisp >= INT32_MIN && longDisp <= INT32_MAX) {
+                        out.push_back(0xE9);
+                        int32_t r32 = (int32_t)longDisp;
+                        for (int b = 0; b < 4; b++) out.push_back((BYTE)((r32 >> (b*8)) & 0xFF));
+                    } else {
+                        out.push_back(0xFF); out.push_back(0x25);
+                        out.push_back(0); out.push_back(0); out.push_back(0); out.push_back(0);
+                        uintptr_t t = (uintptr_t)origTargetAbs;
+                        for (int b = 0; b < 8; b++) out.push_back((BYTE)((t >> (b*8)) & 0xFF));
+                    }
+                }
+            } else if ((first == 0xE0 || first == 0xE1 || first == 0xE2 || first == 0xE3) && ins.length == 2) {
+                int64_t shortDisp = origTargetAbs - (int64_t)(insNewRip + 2);
+                if (shortDisp >= -128 && shortDisp <= 127) {
+                    out.push_back(first); out.push_back((BYTE)(int8_t)shortDisp);
+                } else {
+                    err = "loop/jrcxz rel8 out of range and has no long form"; return false;
+                }
+            } else {
+                char e[128]; sprintf_s(e, "unhandled relative branch at +%zu (byte 0x%02X)", pos, first);
+                err = e; return false;
+            }
+        }
+        pos += ins.length;
+    }
+    return true;
+}
+
+static size_t DetectSpliceBoundary(const BYTE* prefetch, size_t prefetchLen, size_t minBytes, std::string& err) {
+    static ZydisDecoder s_dec;
+    static bool s_init = false;
+    if (!s_init) {
+        if (!ZYAN_SUCCESS(ZydisDecoderInit(&s_dec,
+                ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+            err = "Zydis decoder init failed"; return 0;
+        }
+        s_init = true;
+    }
+    size_t pos = 0;
+    while (pos < minBytes && pos < prefetchLen) {
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&s_dec,
+                prefetch + pos, prefetchLen - pos, &ins, ops))) {
+            char e[96]; sprintf_s(e, "decode failed during boundary scan at +%zu", pos);
+            err = e; return 0;
+        }
+        pos += ins.length;
+    }
+    if (pos < minBytes) { err = "not enough bytes to find clean splice boundary"; return 0; }
+    return pos;
+}
+
 void InstallTrampolineHook() {
     if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
     char addrStr[64] = {}, scStr[8192] = {};
@@ -3936,26 +4266,58 @@ void InstallTrampolineHook() {
         return;
     }
 
-    SIZE_T patchSize = 14;  
-    SIZE_T jmpBackSize = 14;
+    const SIZE_T jmpOutSize = 14;
+    const SIZE_T jmpBackSize = 14;
 
-    std::vector<BYTE> orig(patchSize);
+    BYTE prefetch[64] = {};
     SIZE_T r = 0;
-    if (!ReadProcessMemory(hProcess, target, orig.data(), patchSize, &r) || r != patchSize) {
-        LogToStatus("Failed to read original bytes at target", true); return;
+    if (!ReadProcessMemory(hProcess, target, prefetch, sizeof(prefetch), &r) || r < jmpOutSize) {
+        LogToStatus("Failed to read target for boundary detection", true); return;
+    }
+    std::string berr;
+    SIZE_T patchSize = DetectSpliceBoundary(prefetch, r, jmpOutSize, berr);
+    if (!patchSize) {
+        char msg[256]; sprintf_s(msg, "Splice boundary detection failed: %s", berr.c_str());
+        LogToStatus(msg, true); return;
     }
 
-    SIZE_T trampSize = userSc.size() + patchSize + jmpBackSize;
+    std::vector<BYTE> orig(prefetch, prefetch + patchSize);
+
+    SIZE_T trampSize = userSc.size() + patchSize + jmpBackSize + 32;
     LPVOID tramp = VirtualAllocEx(hProcess, nullptr, trampSize,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!tramp) { LogToStatus("VirtualAllocEx (trampoline) failed", true); return; }
 
-    std::vector<BYTE> trampBuf(trampSize);
+    std::vector<BYTE> relocated;
+    std::string relErr;
+    uintptr_t newRip = (uintptr_t)tramp + userSc.size();
+    if (!RelocateInstructions(orig.data(), patchSize, (uintptr_t)target, newRip, relocated, relErr)) {
+        VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+        char msg[256]; sprintf_s(msg, "Relocation failed: %s", relErr.c_str());
+        LogToStatus(msg, true); return;
+    }
+
+    SIZE_T needed = userSc.size() + relocated.size() + jmpBackSize;
+    if (needed > trampSize) {
+        VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+        trampSize = needed;
+        tramp = VirtualAllocEx(hProcess, nullptr, trampSize,
+            MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tramp) { LogToStatus("VirtualAllocEx (resized trampoline) failed", true); return; }
+        newRip = (uintptr_t)tramp + userSc.size();
+        relocated.clear();
+        if (!RelocateInstructions(orig.data(), patchSize, (uintptr_t)target, newRip, relocated, relErr)) {
+            VirtualFreeEx(hProcess, tramp, 0, MEM_RELEASE);
+            LogToStatus("Relocation failed after resize", true); return;
+        }
+    }
+
+    std::vector<BYTE> trampBuf(trampSize, 0x90);
     memcpy(trampBuf.data(), userSc.data(), userSc.size());
-    memcpy(trampBuf.data() + userSc.size(), orig.data(), patchSize);
+    memcpy(trampBuf.data() + userSc.size(), relocated.data(), relocated.size());
 
     uintptr_t backAddr = (uintptr_t)target + patchSize;
-    BYTE* jmpBack = trampBuf.data() + userSc.size() + patchSize;
+    BYTE* jmpBack = trampBuf.data() + userSc.size() + relocated.size();
     jmpBack[0] = 0xFF; jmpBack[1] = 0x25;
     jmpBack[2] = jmpBack[3] = jmpBack[4] = jmpBack[5] = 0;
     memcpy(jmpBack + 6, &backAddr, 8);
@@ -3966,7 +4328,7 @@ void InstallTrampolineHook() {
         LogToStatus("Failed to write trampoline", true); return;
     }
 
-    std::vector<BYTE> patch(patchSize);
+    std::vector<BYTE> patch(patchSize, 0x90);
     uintptr_t trampU = (uintptr_t)tramp;
     patch[0] = 0xFF; patch[1] = 0x25;
     patch[2] = patch[3] = patch[4] = patch[5] = 0;
@@ -3992,12 +4354,14 @@ void InstallTrampolineHook() {
     hr.trampolineAddr = tramp;
     hr.trampolineSize = trampSize;
     hr.installed = true;
-    hr.description = "x64 abs JMP trampoline";
+    char desc[160];
+    sprintf_s(desc, "x64 abs JMP trampoline (splice=%zu, reloc=%zu)", patchSize, relocated.size());
+    hr.description = desc;
     g_hooks.push_back(hr);
 
     char msg[256];
-    sprintf_s(msg, "Hook installed: target=0x%p tramp=0x%p (%zu bytes)",
-        target, tramp, trampSize);
+    sprintf_s(msg, "Hook installed: target=0x%p tramp=0x%p splice=%zuB reloc=%zuB",
+        target, tramp, patchSize, relocated.size());
     LogToStatus(msg);
     RefreshHooksUI();
 }
@@ -4042,6 +4406,259 @@ void RefreshHooksUI() {
             h.trampolineSize, h.description.c_str());
         AppendEditText(hLstHooks, line);
     }
+}
+
+void RunAutoPointerScan() {
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+
+    char tgtStr[64] = {}, depthStr[16] = {}, offStr[16] = {};
+    GetWindowTextA(hEditApsTarget, tgtStr, sizeof(tgtStr));
+    GetWindowTextA(hEditApsDepth, depthStr, sizeof(depthStr));
+    GetWindowTextA(hEditApsMaxOff, offStr, sizeof(offStr));
+    uintptr_t target = strtoull(tgtStr, nullptr, 0);
+    int maxDepth = atoi(depthStr); if (maxDepth <= 0) maxDepth = 3; if (maxDepth > 6) maxDepth = 6;
+    intptr_t maxOff = (intptr_t)strtoll(offStr, nullptr, 0);
+    if (maxOff <= 0) maxOff = 0x800;
+    if (maxOff > 0x10000) maxOff = 0x10000;
+    if (!target) { LogToStatus("Enter a valid target address (hex 0x...)", true); return; }
+
+    ClearEditText(hLstApsResults);
+    char hdr[256];
+    sprintf_s(hdr, "=== AUTO POINTER SCAN  target=0x%llX  depth=%d  maxOff=0x%llX ===",
+        (unsigned long long)target, maxDepth, (long long)maxOff);
+    AppendEditText(hLstApsResults, hdr);
+
+    struct ModRange { uintptr_t base; uintptr_t end; std::string name; };
+    std::vector<ModRange> mods;
+    {
+        HMODULE hmods[1024]; DWORD needed = 0;
+        if (EnumProcessModules(hProcess, hmods, sizeof(hmods), &needed)) {
+            DWORD cnt = needed / sizeof(HMODULE);
+            for (DWORD i = 0; i < cnt; i++) {
+                char p[MAX_PATH] = {};
+                GetModuleFileNameExA(hProcess, hmods[i], p, MAX_PATH);
+                MODULEINFO mi = {};
+                if (!GetModuleInformation(hProcess, hmods[i], &mi, sizeof(mi))) continue;
+                const char* nm = strrchr(p, '\\'); nm = nm ? nm + 1 : p;
+                ModRange m;
+                m.base = (uintptr_t)mi.lpBaseOfDll;
+                m.end  = m.base + mi.SizeOfImage;
+                m.name = nm;
+                mods.push_back(m);
+            }
+        }
+    }
+    auto inModule = [&](uintptr_t a) -> ModRange* {
+        for (auto& m : mods) if (a >= m.base && a < m.end) return &m;
+        return nullptr;
+    };
+
+    struct MemBlock { uintptr_t base; std::vector<BYTE> data; };
+    std::vector<MemBlock> blocks;
+    size_t totalRead = 0;
+    {
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        LPVOID addr = si.lpMinimumApplicationAddress;
+        while (addr < si.lpMaximumApplicationAddress) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+            if (mbi.State == MEM_COMMIT &&
+                (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READ |
+                                PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
+                !(mbi.Protect & PAGE_GUARD)) {
+                SIZE_T chunk = mbi.RegionSize;
+                if (chunk > (SIZE_T)(8 * 1024 * 1024)) chunk = 8 * 1024 * 1024;
+                MemBlock b;
+                b.base = (uintptr_t)mbi.BaseAddress;
+                b.data.resize(chunk);
+                SIZE_T r;
+                if (ReadProcessMemory(hProcess, mbi.BaseAddress, b.data.data(), chunk, &r) && r > 0) {
+                    b.data.resize(r);
+                    totalRead += r;
+                    blocks.push_back(std::move(b));
+                }
+                if (totalRead > (size_t)1 * 1024 * 1024 * 1024) break;
+            }
+            addr = (LPVOID)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
+        }
+    }
+    char snapMsg[160];
+    sprintf_s(snapMsg, "Snapshot: %zu region(s), %zu MB scanned",
+        blocks.size(), totalRead / (1024 * 1024));
+    AppendEditText(hLstApsResults, snapMsg);
+
+    struct LevelEntry { uintptr_t addr; std::vector<intptr_t> offsetsLeafFirst; };
+    std::vector<LevelEntry> current;
+    current.push_back({target, {}});
+
+    g_lastAutoPtrScan.clear();
+    const size_t MAX_PER_LEVEL = 8000;
+    const size_t MAX_FINALS    = 500;
+
+    std::set<uintptr_t> seenPtrs;
+
+    for (int depth = 1; depth <= maxDepth && !current.empty(); depth++) {
+        std::vector<uintptr_t> needles;
+        needles.reserve(current.size());
+        for (auto& e : current) needles.push_back(e.addr);
+
+        std::vector<LevelEntry> next;
+        for (auto& blk : blocks) {
+            if (blk.data.size() < 8) continue;
+            BYTE* buf = blk.data.data();
+            size_t sz = blk.data.size();
+            for (size_t off = 0; off + 8 <= sz; off += 8) {
+                uintptr_t v;
+                memcpy(&v, buf + off, 8);
+                for (size_t ni = 0; ni < needles.size(); ni++) {
+                    uintptr_t needle = needles[ni];
+                    if (v <= needle && (needle - v) <= (uintptr_t)maxOff) {
+                        intptr_t delta = (intptr_t)(needle - v);
+                        uintptr_t pAddr = blk.base + off;
+                        if (seenPtrs.insert(pAddr).second == false && depth > 1) continue;
+                        LevelEntry ce;
+                        ce.addr = pAddr;
+                        ce.offsetsLeafFirst = current[ni].offsetsLeafFirst;
+                        ce.offsetsLeafFirst.push_back(delta);
+
+                        ModRange* mod = inModule(pAddr);
+                        if (mod) {
+                            AutoPtrScanResult fc;
+                            fc.moduleName = mod->name;
+                            fc.moduleBase = mod->base;
+                            fc.baseOff    = pAddr - mod->base;
+                            fc.offsets.assign(ce.offsetsLeafFirst.rbegin(), ce.offsetsLeafFirst.rend());
+                            fc.resolved   = pAddr;
+                            g_lastAutoPtrScan.push_back(fc);
+                            if (g_lastAutoPtrScan.size() >= MAX_FINALS) goto scanDone;
+                        }
+                        if (next.size() < MAX_PER_LEVEL) next.push_back(ce);
+                    }
+                }
+            }
+        }
+        char prog[160];
+        sprintf_s(prog, "Depth %d: %zu candidate(s) carried, %zu static chain(s) so far",
+            depth, next.size(), g_lastAutoPtrScan.size());
+        AppendEditText(hLstApsResults, prog);
+        current = std::move(next);
+    }
+    scanDone:
+
+    AppendEditText(hLstApsResults, "");
+    if (g_lastAutoPtrScan.empty()) {
+        AppendEditText(hLstApsResults, "No static-rooted chains found.");
+        AppendEditText(hLstApsResults, "Try larger depth/maxOff, or pick a different target.");
+    } else {
+        char fhdr[160];
+        sprintf_s(fhdr, "=== %zu STATIC-ROOTED CHAIN(S) ===", g_lastAutoPtrScan.size());
+        AppendEditText(hLstApsResults, fhdr);
+        AppendEditText(hLstApsResults,
+            "Idx  Module             +BaseOff           Offsets (chain order, root->leaf)");
+        for (size_t i = 0; i < g_lastAutoPtrScan.size() && i < 200; i++) {
+            AutoPtrScanResult& f = g_lastAutoPtrScan[i];
+            std::string offs;
+            for (size_t k = 0; k < f.offsets.size(); k++) {
+                char b[40];
+                sprintf_s(b, k ? ", +0x%llX" : "+0x%llX", (unsigned long long)f.offsets[k]);
+                offs += b;
+            }
+            char line[640];
+            sprintf_s(line, "[%3zu] %-18s +0x%-14llX  %s",
+                i, f.moduleName.c_str(),
+                (unsigned long long)f.baseOff, offs.c_str());
+            AppendEditText(hLstApsResults, line);
+        }
+        if (g_lastAutoPtrScan.size() > 200) {
+            char tr[96];
+            sprintf_s(tr, "(%zu more chain(s) hidden - first 200 shown)",
+                g_lastAutoPtrScan.size() - 200);
+            AppendEditText(hLstApsResults, tr);
+        }
+    }
+
+    AppendEditText(hLstApsResults, "");
+    AppendEditText(hLstApsResults, "--- ZYDIS DISASSEMBLY AT TARGET (256 bytes) ---");
+    {
+        BYTE buf[256] = {};
+        SIZE_T r = 0;
+        if (ReadProcessMemory(hProcess, (LPCVOID)target, buf, sizeof(buf), &r) && r >= 8) {
+            size_t pos = 0;
+            int icount = 0;
+            char line[480];
+            while (pos < r && icount < 80) {
+                char instr[200] = {};
+                int n = DisasmOne(buf + pos, r - pos, target + pos, instr, sizeof(instr));
+                if (n <= 0) n = 1;
+                char hex[64] = {}; int hp = 0;
+                for (int i = 0; i < n && hp < (int)sizeof(hex) - 4; i++)
+                    hp += sprintf_s(hex + hp, sizeof(hex) - hp, "%02X ", buf[pos + i]);
+                sprintf_s(line, "  0x%016llX  %-24s %s",
+                    (unsigned long long)(target + pos), hex, instr);
+                AppendEditText(hLstApsResults, line);
+                pos += n; icount++;
+            }
+        } else {
+            AppendEditText(hLstApsResults, "  (target memory not readable, or too short)");
+        }
+    }
+
+    if (!g_lastAutoPtrScan.empty()) {
+        AppendEditText(hLstApsResults, "");
+        AppendEditText(hLstApsResults, "--- ZYDIS DISASSEMBLY AT EACH ROOT POINTER (first 4 chains, 64 B each) ---");
+        size_t nDis = g_lastAutoPtrScan.size(); if (nDis > 4) nDis = 4;
+        for (size_t i = 0; i < nDis; i++) {
+            AutoPtrScanResult& f = g_lastAutoPtrScan[i];
+            char sub[160];
+            sprintf_s(sub, "  [chain %zu] root @ %s+0x%llX = 0x%llX",
+                i, f.moduleName.c_str(),
+                (unsigned long long)f.baseOff, (unsigned long long)f.resolved);
+            AppendEditText(hLstApsResults, sub);
+            BYTE buf[64] = {};
+            SIZE_T r = 0;
+            if (ReadProcessMemory(hProcess, (LPCVOID)f.resolved, buf, sizeof(buf), &r) && r >= 8) {
+                size_t pos = 0; int ic = 0;
+                while (pos < r && ic < 16) {
+                    char instr[200] = {};
+                    int n = DisasmOne(buf + pos, r - pos, f.resolved + pos, instr, sizeof(instr));
+                    if (n <= 0) n = 1;
+                    char hex[48] = {}; int hp = 0;
+                    for (int b = 0; b < n && hp < (int)sizeof(hex) - 4; b++)
+                        hp += sprintf_s(hex + hp, sizeof(hex) - hp, "%02X ", buf[pos + b]);
+                    char line[400];
+                    sprintf_s(line, "    0x%016llX  %-20s %s",
+                        (unsigned long long)(f.resolved + pos), hex, instr);
+                    AppendEditText(hLstApsResults, line);
+                    pos += n; ic++;
+                }
+            }
+        }
+    }
+
+    char done[128];
+    sprintf_s(done, "Auto pointer scan complete: %zu chain(s)", g_lastAutoPtrScan.size());
+    LogToStatus(done);
+}
+
+void AddAutoPtrScanToChains() {
+    if (g_lastAutoPtrScan.empty()) { LogToStatus("No scan results to add", true); return; }
+    int added = 0;
+    for (size_t i = 0; i < g_lastAutoPtrScan.size() && added < 200; i++) {
+        AutoPtrScanResult& f = g_lastAutoPtrScan[i];
+        PointerChain c;
+        char nm[64];
+        sprintf_s(nm, "auto_%d_%s", (int)(g_chains.size() + added), f.moduleName.c_str());
+        c.name = nm;
+        c.moduleName = f.moduleName;
+        c.baseOffset = f.baseOff;
+        c.offsets = f.offsets;
+        g_chains.push_back(c);
+        added++;
+    }
+    char msg[128];
+    sprintf_s(msg, "Added %d chain(s) to manager (Pointers & Hooks tab)", added);
+    LogToStatus(msg);
+    RefreshChainsUI();
 }
 
 static uintptr_t PatcherParseAddr(HWND hEdit) {
@@ -4508,6 +5125,7 @@ void GoToSelectedExport() {
     if (hPagePtrHook) ShowWindow(hPagePtrHook, SW_HIDE);
     if (hPageExpHnd)  ShowWindow(hPageExpHnd, SW_HIDE);
     if (hPagePatcher) ShowWindow(hPagePatcher, SW_HIDE);
+    if (hPageAutoPtr) ShowWindow(hPageAutoPtr, SW_HIDE);
     LogToStatus("Jumped to export in hex view (Scanner tab)");
 }
 
@@ -4728,7 +5346,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
          ti.pszText = (LPSTR)"Trigger & Monitor"; TabCtrl_InsertItem(hTabCtrl, 7, &ti);
          ti.pszText = (LPSTR)"Pointers & Hooks";  TabCtrl_InsertItem(hTabCtrl, 8, &ti);
          ti.pszText = (LPSTR)"Exports & Handles"; TabCtrl_InsertItem(hTabCtrl, 9, &ti);
-         ti.pszText = (LPSTR)"Binary Patcher";    TabCtrl_InsertItem(hTabCtrl,10, &ti);}
+         ti.pszText = (LPSTR)"Binary Patcher";    TabCtrl_InsertItem(hTabCtrl,10, &ti);
+         ti.pszText = (LPSTR)"Auto Ptr Scan";     TabCtrl_InsertItem(hTabCtrl,11, &ti);}
         RECT tabRc;GetClientRect(hTabCtrl,&tabRc);
         TabCtrl_AdjustRect(hTabCtrl,FALSE,&tabRc);
         int px=tabRc.left,py=tabRc.top,pw=tabRc.right-tabRc.left,ph=tabRc.bottom-tabRc.top;
@@ -4747,6 +5366,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hPagePtrHook = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageExpHnd  = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPagePatcher = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageAutoPtr = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hHdrScan=B(hPageScan,"STATIC","MEMORY SCANNING",0,5,5,220,18,0,hFontSection);
 
         B(hPageTrigger, "STATIC", "TRIGGER SHELLCODE / DLL EXPORT", 0, 5, 5, 300, 18, 0, hFontSection);
@@ -5197,6 +5817,42 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         B(hPagePatcher, "BUTTON", "Refresh", 0, 150, 544, 80, 24, ID_BTN_PATCH_REFRESH);
         hLstPatches = MakeDE(hPagePatcher, 5, 574, 1890, 350, ID_LST_PATCHES);
 
+        B(hPageAutoPtr, "STATIC", "AUTO POINTER SCANNER  (multi-level chain finder + Zydis disasm)",
+          0, 5, 5, 700, 18, 0, hFontSection);
+        B(hPageAutoPtr, "STATIC",
+          "Given a target address, searches backwards through readable memory to find chains "
+          "of pointers rooted in static module memory. After the scan, the target and each "
+          "chain root are disassembled with Zydis so you can see surrounding code.",
+          0, 5, 28, 1700, 16, 0, hFontSmall);
+
+        B(hPageAutoPtr, "STATIC", "Target addr:", 0, 5, 58, 90, 22, 0);
+        hEditApsTarget = B(hPageAutoPtr, "EDIT", "0x0",
+            WS_BORDER | ES_AUTOHSCROLL, 100, 56, 240, 24, ID_EDIT_APS_TARGET, hFontMono);
+        B(hPageAutoPtr, "BUTTON", "Use Selected Addr", 0, 348, 56, 140, 24, ID_BTN_APS_USE_SELECTED);
+
+        B(hPageAutoPtr, "STATIC", "Max depth:", 0, 500, 58, 80, 22, 0);
+        hEditApsDepth = B(hPageAutoPtr, "EDIT", "3",
+            WS_BORDER | ES_NUMBER, 585, 56, 50, 24, ID_EDIT_APS_DEPTH, hFontMono);
+        B(hPageAutoPtr, "STATIC", "(1..6)", 0, 640, 60, 50, 18, 0, hFontSmall);
+
+        B(hPageAutoPtr, "STATIC", "Max offset per level:", 0, 700, 58, 140, 22, 0);
+        hEditApsMaxOff = B(hPageAutoPtr, "EDIT", "0x800",
+            WS_BORDER | ES_AUTOHSCROLL, 845, 56, 100, 24, ID_EDIT_APS_MAXOFF, hFontMono);
+        B(hPageAutoPtr, "STATIC", "(hex; capped at 0x10000)", 0, 950, 60, 180, 18, 0, hFontSmall);
+
+        B(hPageAutoPtr, "BUTTON", "Scan", 0, 5, 90, 120, 28, ID_BTN_APS_SCAN);
+        B(hPageAutoPtr, "BUTTON", "Add All to Chain Manager", 0, 130, 90, 200, 28, ID_BTN_APS_ADDCHAIN);
+        B(hPageAutoPtr, "BUTTON", "Clear", 0, 335, 90, 80, 28, ID_BTN_APS_CLEAR);
+        B(hPageAutoPtr, "BUTTON", "Help", 0, 420, 90, 70, 28, ID_BTN_APS_HELP);
+
+        B(hPageAutoPtr, "STATIC",
+          "Output below shows: snapshot info, per-depth candidate counts, final static-rooted "
+          "chains (in chain-resolution order), and Zydis disassembly of the target plus first "
+          "few chain roots.",
+          0, 5, 125, 1700, 16, 0, hFontSmall);
+
+        hLstApsResults = MakeDE(hPageAutoPtr, 5, 148, 1890, 820, ID_LST_APS_RESULTS);
+
         hStatusWnd=CreateWindowA("STATIC",
             "Ready - type or browse a PID and click Attach.  All panels are selectable: click, Ctrl+A, Ctrl+C.",
             WS_CHILD|WS_VISIBLE|SS_SUNKEN,0,1040,1920,24,hWnd,NULL,hInst,NULL);
@@ -5266,7 +5922,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         HDC hdc=(HDC)wParam; HWND hCtrl=(HWND)lParam;
         if(hCtrl==hScanResultsWnd||hCtrl==hMemoryMapWnd||hCtrl==hHexViewWnd||
             hCtrl==hLstModules||hCtrl==hLstWatchList||hCtrl==hLstCaves||hCtrl==hLstThreads||
-            hCtrl==hLstWindows||hCtrl==hLstDetect||hCtrl==hLstTriggerLog){
+            hCtrl==hLstWindows||hCtrl==hLstDetect||hCtrl==hLstTriggerLog||
+            hCtrl==hLstApsResults){
             SetBkColor(hdc,CLR_BG_LIST);SetTextColor(hdc,CLR_TEXT_LIST);
             return(LRESULT)hBrushList;
         }
@@ -5297,6 +5954,12 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if (hPagePtrHook) SetWindowPos(hPagePtrHook, NULL, px, py, pw, ph, SWP_NOZORDER);
             if (hPageExpHnd)  SetWindowPos(hPageExpHnd,  NULL, px, py, pw, ph, SWP_NOZORDER);
             if (hPagePatcher) SetWindowPos(hPagePatcher, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPageAutoPtr) SetWindowPos(hPageAutoPtr, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hLstApsResults) {
+                int dx = std::max(0, pw - 10);
+                int dy = std::max(0, ph - 158);
+                SetWindowPos(hLstApsResults, NULL, 5, 148, dx, dy, SWP_NOZORDER);
+            }
             if (hLstVerify)  SetWindowPos(hLstVerify,  NULL, 5, 254, std::max(0,pw-10), std::max(0,ph-260), SWP_NOZORDER);
             if(hLstDetect){
                 int dx = std::max(0,pw-10);
@@ -5333,6 +5996,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if (hPagePtrHook) ShowWindow(hPagePtrHook, sel == 8 ? SW_SHOW : SW_HIDE);
             if (hPageExpHnd)  ShowWindow(hPageExpHnd,  sel == 9 ? SW_SHOW : SW_HIDE);
             if (hPagePatcher) ShowWindow(hPagePatcher, sel ==10 ? SW_SHOW : SW_HIDE);
+            if (hPageAutoPtr) ShowWindow(hPageAutoPtr, sel ==11 ? SW_SHOW : SW_HIDE);
         }
         break;
     }
@@ -6266,6 +6930,56 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 "junk jumps, or jump out to a code cave where you have free space\r\n"
                 "to write whatever bytes you want executed.",
                 "Binary Patcher Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
+        case ID_BTN_APS_SCAN: RunAutoPointerScan(); break;
+        case ID_BTN_APS_ADDCHAIN: AddAutoPtrScanToChains(); break;
+        case ID_BTN_APS_CLEAR:
+            ClearEditText(hLstApsResults);
+            g_lastAutoPtrScan.clear();
+            LogToStatus("Auto pointer scan results cleared");
+            break;
+        case ID_BTN_APS_USE_SELECTED: {
+            LPVOID a = GetSelectedAddress();
+            if (!a) { LogToStatus("No address selected in Scanner tab", true); break; }
+            char buf[32]; sprintf_s(buf, "0x%llX", (uintptr_t)a);
+            SetWindowTextA(hEditApsTarget, buf);
+            LogToStatus("Target address set from current selection");
+            break;
+        }
+        case ID_BTN_APS_HELP:
+            MessageBoxA(hWnd,
+                "AUTO POINTER SCANNER\r\n"
+                "====================\r\n\r\n"
+                "Finds multi-level pointer chains rooted in static (image) memory that\r\n"
+                "resolve to your target address.\r\n\r\n"
+                "ALGORITHM\r\n"
+                "  1. Snapshot all readable+committed memory in the target process.\r\n"
+                "  2. For each level 1..maxDepth, look for 8-byte aligned positions whose\r\n"
+                "     stored qword V satisfies: target - maxOffset <= V <= target.\r\n"
+                "     That position is a candidate pointer; offset = target - V.\r\n"
+                "  3. If the candidate is itself inside a loaded module (MEM_IMAGE), it\r\n"
+                "     becomes the static root of a chain. Otherwise it becomes the new\r\n"
+                "     target for the next level.\r\n"
+                "  4. Capped at 8000 carried candidates/level and 500 final chains so\r\n"
+                "     the scan terminates.\r\n\r\n"
+                "OUTPUT\r\n"
+                "  Each chain is shown in resolve order: module + baseOff, then offsets\r\n"
+                "  applied root-to-leaf. The same offsets can be pasted into the chain\r\n"
+                "  manager on the Pointers & Hooks tab (or click 'Add All to Chain\r\n"
+                "  Manager' to bulk-import them).\r\n\r\n"
+                "ZYDIS DISASSEMBLY\r\n"
+                "  After the scan, 256 B at the target and 64 B at each of the first 4\r\n"
+                "  chain roots are disassembled with Zydis. Useful when the target is a\r\n"
+                "  code address (vtable slot, hook site) or when the chain root sits in\r\n"
+                "  a code-adjacent .data/.rdata section and you want to see what writes\r\n"
+                "  to it nearby.\r\n\r\n"
+                "TIPS\r\n"
+                "  * For game cheats: depth 3-5, maxOff 0x800-0x1000 is usually enough.\r\n"
+                "  * If no chains: try larger depth or maxOff; or the value is heap-only.\r\n"
+                "  * Scanning 1 GB+ processes may take a minute. The UI freezes during\r\n"
+                "    the scan - the scan does not modify the target.",
+                "Auto Pointer Scanner Help", MB_OK | MB_ICONINFORMATION);
             break;
 
         case WM_LBUTTONUP: break;
