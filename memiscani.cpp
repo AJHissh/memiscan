@@ -367,6 +367,20 @@ static std::vector<HandleInfoEntry> g_handles;
 #define ID_BTN_APS_USE_SELECTED 1007
 #define ID_BTN_APS_HELP         1008
 
+#define ID_EDIT_DW_TARGET       1020
+#define ID_EDIT_DW_OFFSET       1021
+#define ID_EDIT_DW_VIEW_SIZE    1022
+#define ID_EDIT_DW_STEP         1023
+#define ID_BTN_DW_REFRESH       1024
+#define ID_BTN_DW_USE_SELECTED  1025
+#define ID_BTN_DW_STEP_BACK     1026
+#define ID_BTN_DW_PAGE_BACK     1027
+#define ID_BTN_DW_CENTER        1028
+#define ID_BTN_DW_PAGE_FWD      1029
+#define ID_BTN_DW_STEP_FWD      1030
+#define ID_BTN_DW_HELP          1031
+#define ID_LST_DW_DISASM        1032
+
 #define DT_INT32  0
 #define DT_INT16  1
 #define DT_INT8   2
@@ -456,6 +470,10 @@ HWND hLstPatches = NULL;
 HWND hPageAutoPtr = NULL;
 HWND hEditApsTarget = NULL, hEditApsDepth = NULL, hEditApsMaxOff = NULL;
 HWND hLstApsResults = NULL;
+
+HWND hPageDisasmWalk = NULL;
+HWND hEditDwTarget = NULL, hEditDwOffset = NULL, hEditDwViewSize = NULL, hEditDwStep = NULL;
+HWND hLstDwDisasm = NULL;
 
 HWND hTabCtrl, hPageScan, hPageMods, hPageInject, hPageWnd, hPageDetect, hPageShellcode;
 
@@ -604,6 +622,8 @@ void PatcherRestoreSelected();
 void PatcherRefreshList();
 void RunAutoPointerScan();
 void AddAutoPtrScanToChains();
+void DisasmWalkerRefresh();
+void DisasmWalkerAdjustOffset(intptr_t delta);
 static int DisasmOne(const BYTE* b, size_t left, uint64_t rva, char* out, size_t outSz);
 
 
@@ -4640,6 +4660,139 @@ void RunAutoPointerScan() {
     LogToStatus(done);
 }
 
+void DisasmWalkerRefresh() {
+    if (!hLstDwDisasm) return;
+    if (!hProcess) { LogToStatus("Attach to a process first", true); return; }
+
+    char tgtStr[64] = {}, offStr[32] = {}, sizeStr[32] = {};
+    GetWindowTextA(hEditDwTarget,   tgtStr,  sizeof(tgtStr));
+    GetWindowTextA(hEditDwOffset,   offStr,  sizeof(offStr));
+    GetWindowTextA(hEditDwViewSize, sizeStr, sizeof(sizeStr));
+
+    uintptr_t target = strtoull(tgtStr, nullptr, 0);
+    intptr_t  offset = (intptr_t)strtoll(offStr, nullptr, 0);
+    int viewSize = (int)strtoul(sizeStr, nullptr, 0);
+    if (viewSize <= 0)   viewSize = 256;
+    if (viewSize > 4096) viewSize = 4096;
+    if (!target) { LogToStatus("Enter a target address (hex 0x...)", true); return; }
+
+    uintptr_t startAddr = (uintptr_t)((int64_t)target + (int64_t)offset);
+
+    ClearEditText(hLstDwDisasm);
+    char hdr[320];
+    sprintf_s(hdr,
+        "=== DISASM WALKER  target=0x%llX  offset=%s0x%llX  window=0x%llX..0x%llX  (%d B) ===",
+        (unsigned long long)target,
+        offset >= 0 ? "+" : "-",
+        (unsigned long long)(offset >= 0 ? offset : -offset),
+        (unsigned long long)startAddr,
+        (unsigned long long)(startAddr + (uintptr_t)viewSize),
+        viewSize);
+    AppendEditText(hLstDwDisasm, hdr);
+    AppendEditText(hLstDwDisasm, "");
+
+    std::vector<BYTE> buf(viewSize);
+    SIZE_T r = 0;
+    if (!ReadProcessMemory(hProcess, (LPCVOID)startAddr, buf.data(), viewSize, &r) || r == 0) {
+        AppendEditText(hLstDwDisasm, "[read failed - address not readable or unmapped]");
+        LogToStatus("Walker: read failed", true);
+        return;
+    }
+    if (r < (SIZE_T)viewSize) {
+        char w[160];
+        sprintf_s(w, "[partial read: %zu of %d bytes - end of region reached]", r, viewSize);
+        AppendEditText(hLstDwDisasm, w);
+    }
+
+    AppendEditText(hLstDwDisasm, "--- HEX DUMP ---");
+    AppendEditText(hLstDwDisasm,
+        "Address              | 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F | ASCII");
+    AppendEditText(hLstDwDisasm,
+        "---------------------+-------------------------------------------------+-----------------");
+    for (size_t i = 0; i < r; i += 16) {
+        char line[320] = {};
+        sprintf_s(line, "0x%016llX | ", (unsigned long long)(startAddr + i));
+        char asc[20] = {};
+        for (int j = 0; j < 16; j++) {
+            if (i + j < r) {
+                char h[4]; sprintf_s(h, "%02X ", buf[i + j]);
+                strcat_s(line, h);
+                asc[j] = (buf[i + j] >= 32 && buf[i + j] < 127) ? (char)buf[i + j] : '.';
+            } else {
+                strcat_s(line, "   ");
+                asc[j] = ' ';
+            }
+        }
+        asc[16] = 0;
+        strcat_s(line, "| "); strcat_s(line, asc);
+        uintptr_t rowAddr = startAddr + i;
+        if (target >= rowAddr && target < rowAddr + 16) {
+            char m[80];
+            sprintf_s(m, "  <-- target (+0x%llX into row)", (unsigned long long)(target - rowAddr));
+            strcat_s(line, m);
+        }
+        AppendEditText(hLstDwDisasm, line);
+    }
+
+    AppendEditText(hLstDwDisasm, "");
+    AppendEditText(hLstDwDisasm, "--- ZYDIS DISASSEMBLY ---");
+    AppendEditText(hLstDwDisasm,
+        "  Address              Bytes                       Instruction");
+    AppendEditText(hLstDwDisasm,
+        "  -------------------+---------------------------+-----------------------------------");
+    size_t pos = 0;
+    int instrCount = 0;
+    const int maxInstr = 1024;
+    while (pos < r && instrCount < maxInstr) {
+        char instr[200] = {};
+        int n = DisasmOne(buf.data() + pos, r - pos, startAddr + pos, instr, sizeof(instr));
+        if (n <= 0) n = 1;
+
+        char hex[64] = {}; int hp = 0;
+        for (int b = 0; b < n && hp < (int)sizeof(hex) - 4; b++)
+            hp += sprintf_s(hex + hp, sizeof(hex) - hp, "%02X ", buf[pos + b]);
+
+        const char* flag = "";
+        if (strstr(instr, "syscall"))     flag = "  <-- SYSCALL";
+        else if (strstr(instr, "int3"))   flag = "  <-- INT3";
+        else if (strstr(instr, "gs:"))    flag = "  <-- TEB/PEB";
+        else if (strstr(instr, "call"))   flag = "  <-- CALL";
+        else if (strncmp(instr, "ret", 3) == 0) flag = "  <-- RET";
+        else if (strstr(instr, "ud2"))    flag = "  <-- UD2 (likely data)";
+
+        char tgtMark[16] = "";
+        uintptr_t insAddr = startAddr + pos;
+        if (target >= insAddr && target < insAddr + (uintptr_t)n)
+            strcpy_s(tgtMark, "  <<<");
+
+        char line[480];
+        sprintf_s(line, "  0x%016llX  %-27s %s%s%s",
+            (unsigned long long)insAddr, hex, instr, flag, tgtMark);
+        AppendEditText(hLstDwDisasm, line);
+
+        pos += n;
+        instrCount++;
+    }
+
+    AppendEditText(hLstDwDisasm, "");
+    char done[180];
+    sprintf_s(done, "Walker: %d instruction(s) decoded across %zu bytes", instrCount, r);
+    AppendEditText(hLstDwDisasm, done);
+    LogToStatus(done);
+}
+
+void DisasmWalkerAdjustOffset(intptr_t delta) {
+    char offStr[32] = {};
+    GetWindowTextA(hEditDwOffset, offStr, sizeof(offStr));
+    int64_t cur = strtoll(offStr, nullptr, 0);
+    int64_t next = cur + (int64_t)delta;
+    char buf[40];
+    if (next < 0) sprintf_s(buf, "-0x%llX", (unsigned long long)(-next));
+    else          sprintf_s(buf, "0x%llX",  (unsigned long long)next);
+    SetWindowTextA(hEditDwOffset, buf);
+    DisasmWalkerRefresh();
+}
+
 void AddAutoPtrScanToChains() {
     if (g_lastAutoPtrScan.empty()) { LogToStatus("No scan results to add", true); return; }
     int added = 0;
@@ -5126,6 +5279,7 @@ void GoToSelectedExport() {
     if (hPageExpHnd)  ShowWindow(hPageExpHnd, SW_HIDE);
     if (hPagePatcher) ShowWindow(hPagePatcher, SW_HIDE);
     if (hPageAutoPtr) ShowWindow(hPageAutoPtr, SW_HIDE);
+    if (hPageDisasmWalk) ShowWindow(hPageDisasmWalk, SW_HIDE);
     LogToStatus("Jumped to export in hex view (Scanner tab)");
 }
 
@@ -5347,7 +5501,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
          ti.pszText = (LPSTR)"Pointers & Hooks";  TabCtrl_InsertItem(hTabCtrl, 8, &ti);
          ti.pszText = (LPSTR)"Exports & Handles"; TabCtrl_InsertItem(hTabCtrl, 9, &ti);
          ti.pszText = (LPSTR)"Binary Patcher";    TabCtrl_InsertItem(hTabCtrl,10, &ti);
-         ti.pszText = (LPSTR)"Auto Ptr Scan";     TabCtrl_InsertItem(hTabCtrl,11, &ti);}
+         ti.pszText = (LPSTR)"Auto Ptr Scan";     TabCtrl_InsertItem(hTabCtrl,11, &ti);
+         ti.pszText = (LPSTR)"Disasm Walker";     TabCtrl_InsertItem(hTabCtrl,12, &ti);}
         RECT tabRc;GetClientRect(hTabCtrl,&tabRc);
         TabCtrl_AdjustRect(hTabCtrl,FALSE,&tabRc);
         int px=tabRc.left,py=tabRc.top,pw=tabRc.right-tabRc.left,ph=tabRc.bottom-tabRc.top;
@@ -5367,6 +5522,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         hPageExpHnd  = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPagePatcher = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hPageAutoPtr = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
+        hPageDisasmWalk = CreateWindowA("MemPage","",WS_CHILD|WS_CLIPSIBLINGS, px,py,pw,ph,hTabCtrl,NULL,hInst,NULL);
         hHdrScan=B(hPageScan,"STATIC","MEMORY SCANNING",0,5,5,220,18,0,hFontSection);
 
         B(hPageTrigger, "STATIC", "TRIGGER SHELLCODE / DLL EXPORT", 0, 5, 5, 300, 18, 0, hFontSection);
@@ -5853,6 +6009,49 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
 
         hLstApsResults = MakeDE(hPageAutoPtr, 5, 148, 1890, 820, ID_LST_APS_RESULTS);
 
+        B(hPageDisasmWalk, "STATIC",
+          "DISASM WALKER  (hex + Zydis around a target, step / page up & down)",
+          0, 5, 5, 700, 18, 0, hFontSection);
+        B(hPageDisasmWalk, "STATIC",
+          "Reads 'View bytes' starting at (target + offset) and shows hex dump plus "
+          "Zydis disassembly. Step adjusts offset by the step size; Page adjusts by the "
+          "full view size. Center resets offset to 0.",
+          0, 5, 28, 1700, 16, 0, hFontSmall);
+
+        B(hPageDisasmWalk, "STATIC", "Target addr:", 0, 5, 56, 90, 22, 0);
+        hEditDwTarget = B(hPageDisasmWalk, "EDIT", "0x0",
+            WS_BORDER | ES_AUTOHSCROLL, 100, 54, 240, 24, ID_EDIT_DW_TARGET, hFontMono);
+        B(hPageDisasmWalk, "BUTTON", "Use Selected Addr", 0, 348, 54, 140, 24, ID_BTN_DW_USE_SELECTED);
+
+        B(hPageDisasmWalk, "STATIC", "Offset:", 0, 500, 56, 60, 22, 0);
+        hEditDwOffset = B(hPageDisasmWalk, "EDIT", "0x0",
+            WS_BORDER | ES_AUTOHSCROLL, 565, 54, 130, 24, ID_EDIT_DW_OFFSET, hFontMono);
+        B(hPageDisasmWalk, "STATIC", "(signed, hex)", 0, 700, 58, 90, 18, 0, hFontSmall);
+
+        B(hPageDisasmWalk, "STATIC", "View bytes:", 0, 800, 56, 85, 22, 0);
+        hEditDwViewSize = B(hPageDisasmWalk, "EDIT", "256",
+            WS_BORDER | ES_NUMBER, 890, 54, 80, 24, ID_EDIT_DW_VIEW_SIZE, hFontMono);
+
+        B(hPageDisasmWalk, "STATIC", "Step:", 0, 985, 56, 45, 22, 0);
+        hEditDwStep = B(hPageDisasmWalk, "EDIT", "0x20",
+            WS_BORDER | ES_AUTOHSCROLL, 1035, 54, 80, 24, ID_EDIT_DW_STEP, hFontMono);
+
+        B(hPageDisasmWalk, "BUTTON", "Refresh", 0, 1130, 54, 80, 24, ID_BTN_DW_REFRESH);
+        B(hPageDisasmWalk, "BUTTON", "Help",    0, 1215, 54, 60, 24, ID_BTN_DW_HELP);
+
+        B(hPageDisasmWalk, "BUTTON", "<< Page Back",   0, 5,   90, 120, 28, ID_BTN_DW_PAGE_BACK);
+        B(hPageDisasmWalk, "BUTTON", "<  Step Back",   0, 130, 90, 120, 28, ID_BTN_DW_STEP_BACK);
+        B(hPageDisasmWalk, "BUTTON", "Center on Target", 0, 255, 90, 150, 28, ID_BTN_DW_CENTER);
+        B(hPageDisasmWalk, "BUTTON", "Step Fwd  >",   0, 410, 90, 120, 28, ID_BTN_DW_STEP_FWD);
+        B(hPageDisasmWalk, "BUTTON", "Page Fwd  >>",  0, 535, 90, 120, 28, ID_BTN_DW_PAGE_FWD);
+
+        B(hPageDisasmWalk, "STATIC",
+          "Tip: 'Step' uses the bytes value in the Step box; 'Page' uses the View bytes "
+          "value. Toggle signs in Offset to inspect memory below the target (e.g. -0x100).",
+          0, 5, 124, 1700, 16, 0, hFontSmall);
+
+        hLstDwDisasm = MakeDE(hPageDisasmWalk, 5, 148, 1890, 820, ID_LST_DW_DISASM);
+
         hStatusWnd=CreateWindowA("STATIC",
             "Ready - type or browse a PID and click Attach.  All panels are selectable: click, Ctrl+A, Ctrl+C.",
             WS_CHILD|WS_VISIBLE|SS_SUNKEN,0,1040,1920,24,hWnd,NULL,hInst,NULL);
@@ -5923,7 +6122,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
         if(hCtrl==hScanResultsWnd||hCtrl==hMemoryMapWnd||hCtrl==hHexViewWnd||
             hCtrl==hLstModules||hCtrl==hLstWatchList||hCtrl==hLstCaves||hCtrl==hLstThreads||
             hCtrl==hLstWindows||hCtrl==hLstDetect||hCtrl==hLstTriggerLog||
-            hCtrl==hLstApsResults){
+            hCtrl==hLstApsResults||hCtrl==hLstDwDisasm){
             SetBkColor(hdc,CLR_BG_LIST);SetTextColor(hdc,CLR_TEXT_LIST);
             return(LRESULT)hBrushList;
         }
@@ -5955,10 +6154,16 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if (hPageExpHnd)  SetWindowPos(hPageExpHnd,  NULL, px, py, pw, ph, SWP_NOZORDER);
             if (hPagePatcher) SetWindowPos(hPagePatcher, NULL, px, py, pw, ph, SWP_NOZORDER);
             if (hPageAutoPtr) SetWindowPos(hPageAutoPtr, NULL, px, py, pw, ph, SWP_NOZORDER);
+            if (hPageDisasmWalk) SetWindowPos(hPageDisasmWalk, NULL, px, py, pw, ph, SWP_NOZORDER);
             if (hLstApsResults) {
                 int dx = std::max(0, pw - 10);
                 int dy = std::max(0, ph - 158);
                 SetWindowPos(hLstApsResults, NULL, 5, 148, dx, dy, SWP_NOZORDER);
+            }
+            if (hLstDwDisasm) {
+                int dx = std::max(0, pw - 10);
+                int dy = std::max(0, ph - 158);
+                SetWindowPos(hLstDwDisasm, NULL, 5, 148, dx, dy, SWP_NOZORDER);
             }
             if (hLstVerify)  SetWindowPos(hLstVerify,  NULL, 5, 254, std::max(0,pw-10), std::max(0,ph-260), SWP_NOZORDER);
             if(hLstDetect){
@@ -5997,6 +6202,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             if (hPageExpHnd)  ShowWindow(hPageExpHnd,  sel == 9 ? SW_SHOW : SW_HIDE);
             if (hPagePatcher) ShowWindow(hPagePatcher, sel ==10 ? SW_SHOW : SW_HIDE);
             if (hPageAutoPtr) ShowWindow(hPageAutoPtr, sel ==11 ? SW_SHOW : SW_HIDE);
+            if (hPageDisasmWalk) ShowWindow(hPageDisasmWalk, sel ==12 ? SW_SHOW : SW_HIDE);
         }
         break;
     }
@@ -6947,6 +7153,81 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam){
             LogToStatus("Target address set from current selection");
             break;
         }
+        case ID_BTN_DW_REFRESH: DisasmWalkerRefresh(); break;
+        case ID_BTN_DW_USE_SELECTED: {
+            LPVOID a = GetSelectedAddress();
+            if (!a) { LogToStatus("No address selected in Scanner tab", true); break; }
+            char buf[32]; sprintf_s(buf, "0x%llX", (uintptr_t)a);
+            SetWindowTextA(hEditDwTarget, buf);
+            SetWindowTextA(hEditDwOffset, "0x0");
+            DisasmWalkerRefresh();
+            break;
+        }
+        case ID_BTN_DW_CENTER:
+            SetWindowTextA(hEditDwOffset, "0x0");
+            DisasmWalkerRefresh();
+            break;
+        case ID_BTN_DW_STEP_BACK: {
+            char s[32] = {}; GetWindowTextA(hEditDwStep, s, sizeof(s));
+            int64_t step = strtoll(s, nullptr, 0); if (step <= 0) step = 0x20;
+            DisasmWalkerAdjustOffset(-(intptr_t)step);
+            break;
+        }
+        case ID_BTN_DW_STEP_FWD: {
+            char s[32] = {}; GetWindowTextA(hEditDwStep, s, sizeof(s));
+            int64_t step = strtoll(s, nullptr, 0); if (step <= 0) step = 0x20;
+            DisasmWalkerAdjustOffset((intptr_t)step);
+            break;
+        }
+        case ID_BTN_DW_PAGE_BACK: {
+            char s[32] = {}; GetWindowTextA(hEditDwViewSize, s, sizeof(s));
+            int page = (int)strtoul(s, nullptr, 0); if (page <= 0) page = 256;
+            DisasmWalkerAdjustOffset(-(intptr_t)page);
+            break;
+        }
+        case ID_BTN_DW_PAGE_FWD: {
+            char s[32] = {}; GetWindowTextA(hEditDwViewSize, s, sizeof(s));
+            int page = (int)strtoul(s, nullptr, 0); if (page <= 0) page = 256;
+            DisasmWalkerAdjustOffset((intptr_t)page);
+            break;
+        }
+        case ID_BTN_DW_HELP:
+            MessageBoxA(hWnd,
+                "DISASM WALKER\r\n"
+                "=============\r\n\r\n"
+                "Reads memory starting at (target + offset) and displays both a hex dump\r\n"
+                "and a Zydis-decoded disassembly. Designed for stepping above/below a\r\n"
+                "target address to find function boundaries, vtables, embedded data,\r\n"
+                "or to verify what just-injected shellcode actually got written.\r\n\r\n"
+                "FIELDS\r\n"
+                "  Target addr  : absolute virtual address (hex 0x...)\r\n"
+                "  Offset       : signed displacement from target (hex; can be negative\r\n"
+                "                 e.g. -0x100 to look back).\r\n"
+                "  View bytes   : window size, 1..4096.\r\n"
+                "  Step         : how many bytes 'Step Back/Fwd' moves at a time.\r\n\r\n"
+                "BUTTONS\r\n"
+                "  Refresh           : re-read at current target+offset\r\n"
+                "  Use Selected Addr : copy the currently-selected scanner address into\r\n"
+                "                      Target, set Offset=0, and refresh\r\n"
+                "  << Page Back      : offset -= View bytes\r\n"
+                "  <  Step Back      : offset -= Step\r\n"
+                "  Center on Target  : offset = 0\r\n"
+                "  Step Fwd >        : offset += Step\r\n"
+                "  Page Fwd >>       : offset += View bytes\r\n\r\n"
+                "OUTPUT\r\n"
+                "  - Hex dump shows 16 bytes per row with ASCII; the row containing the\r\n"
+                "    target gets a marker.\r\n"
+                "  - Disassembly shows address / bytes / instruction, with hints for\r\n"
+                "    syscall, int3, gs:/PEB access, call, ret, ud2. The instruction that\r\n"
+                "    contains the target gets a '<<<' marker.\r\n\r\n"
+                "TIPS\r\n"
+                "  * If the disassembly is full of 'ud2' / 'db 0xNN' lines you're looking\r\n"
+                "    at data, not code - try a different offset.\r\n"
+                "  * Use Page Back / Page Fwd to scroll function-by-function. Step is\r\n"
+                "    useful when you've landed mid-instruction.",
+                "Disasm Walker Help", MB_OK | MB_ICONINFORMATION);
+            break;
+
         case ID_BTN_APS_HELP:
             MessageBoxA(hWnd,
                 "AUTO POINTER SCANNER\r\n"
