@@ -1,6 +1,6 @@
 Proc Mem Analysis tool
 
-Personal tool for in-depth analysis of processes
+Personal tool for in-depth proccess analysis
 
 The tool uses Zydis disassembler to decode shellcode to assembly - you can download download the Zydis source and header file from https://github.com/zyantific/zydis/releases/tag/v4.1.0.
 
