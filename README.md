@@ -7,7 +7,6 @@
 <img width="1900" height="1000" alt="memiscani2" src="https://github.com/user-attachments/assets/cdff40e4-829a-40cf-ba01-4b5daeb5a192" />
 
 
-
 ## 1. Install MinGW-w64 (the C/C++ compiler)
 
 The build needs `gcc`, `g++`, and `ar` (the archiver) in `PATH`.  Pick
@@ -33,7 +32,7 @@ The tool uses Zydis disassembler to decode - so you must download the Zydis sour
 
 ---
 
-## 3. One-time setup
+## 3. Setup
 
 From the project root in `cmd`:
 
@@ -51,7 +50,7 @@ This does, in order:
    into `obj\liblua54.a`.
 
 
-## 4. Pre-compile ImGui (one-time)
+## 4. Pre-compile ImGui 
 
 ```cmd
 build.bat imgui
