@@ -38,9 +38,9 @@ This does, in order:
 1. Creates `build\`, `obj\`, and `obj\lua\`.
 2. **Clones Dear ImGui v1.91.5** into `imgui\` (~10 MB git clone).
 3. **Clones Lua 5.4.7** into `lua54\` (~3 MB git clone).
-4. Compiles `Zydis.c` → `obj\Zydis.o` (~5 seconds).
+4. Compiles `Zydis.c` → `obj\Zydis.o`.
 5. Compiles 32 Lua source files → `obj\lua\*.o`, then archives them
-   into `obj\liblua54.a` (~10 seconds).
+   into `obj\liblua54.a`.
 
 
 ## 5. Pre-compile ImGui (one-time)
