@@ -1,5 +1,9 @@
 # Proc Mem Analysis tool - Memiscani — Full install
 
+## Features - Memory analysis and modification tools with workflow guidance
+<img width="1909" height="992" alt="Memiscani" src="https://github.com/user-attachments/assets/457a4e77-6f53-4172-a27c-9be7ea7f1b98" />
+
+
 ## 1. Install MinGW-w64 (the C/C++ compiler)
 
 The build needs `gcc`, `g++`, and `ar` (the archiver) in `PATH`.  Pick
