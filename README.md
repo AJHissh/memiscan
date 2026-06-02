@@ -16,9 +16,6 @@ memcore.cpp / memcore.h
 mem_lua.cpp / mem_lua.h
 Zydis.c / Zydis.h
 build.bat
-resources\
-   README.txt
-   samples\*
 ```
 
 You do **not** need to get `imgui\` or `lua54\` — `build.bat setup`
