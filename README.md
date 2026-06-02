@@ -25,7 +25,7 @@ The tool uses Zydis disassembler to decode - so you must download the Zydis sour
 
 ---
 
-## 4. One-time setup
+## 3. One-time setup
 
 From the project root in `cmd`:
 
@@ -43,13 +43,13 @@ This does, in order:
    into `obj\liblua54.a`.
 
 
-## 5. Pre-compile ImGui (one-time)
+## 4. Pre-compile ImGui (one-time)
 
 ```cmd
 build.bat imgui
 ```
 
-## 6. Build
+## 5. Build
 
 ```cmd
 build.bat full
