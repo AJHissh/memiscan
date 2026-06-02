@@ -19,21 +19,23 @@ enum ScanCondition {
 struct ScanParams {
     DataType  dt        = DT_INT32;
     ScanCondition sc    = SC_EXACT;
-    std::string  value;         // textual value (parsed per dt)
+    std::string  value;         
     std::string  modFilter;
     bool         writableOnly  = true;
     bool         skipImage     = false;
-    bool         executableOnly = false;     // only PAGE_EXECUTE_* regions
-    bool         workingSetOnly = false;     // only pages currently in working set
-    bool         copyOnWriteOnly = false;    // only PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY
-    uintptr_t    addrMin = 0;                // 0 = no lower limit
-    uintptr_t    addrMax = 0;                // 0 = no upper limit
-    int          alignment = 0;              // 0 = auto (use valSz)
-    bool         skipZero = false;           // skip values that are all-zero
-    std::string  skipAddrSuffixHex;          // skip addresses whose low N hex digits match this
+    bool         executableOnly = false;    
+    bool         workingSetOnly = false;     
+    bool         copyOnWriteOnly = false;    
+    uintptr_t    addrMin = 0;                
+    uintptr_t    addrMax = 0;                
+    int          alignment = 0;              
+    bool         skipZero = false;           
+    std::string  skipAddrSuffixHex;          
     bool         hasMin = false; int64_t rmin = 0; double rminF = 0;
     bool         hasMax = false; int64_t rmax = 0; double rmaxF = 0;
     int          maxResults = 100000;
+    int          strEnc = 2;     
+    bool         strCaseInsensitive = false;  
 };
 
 struct ScanState {
@@ -70,7 +72,6 @@ std::vector<std::pair<DWORD,std::string>> findProcessesByName(const std::string&
 size_t  dtSize(DataType dt);
 int64_t parseHexAwareInt(const char* s);
 
-// Public state (will move into a class once the migration solidifies)
 extern volatile bool g_scanRunning;
 extern volatile bool g_scanStopRequested;
 extern ScanState     g_scan;
@@ -102,7 +103,17 @@ bool filterByBoundedRange(double maxRange, DataType dt, std::string& err);
 
 // Value formatting / read / write -----------------------------------------
 std::string formatTypedValue(const BYTE* data, DataType dt);
+// Length-aware, human-readable rendering of a value of any type.  Numeric types
+// ignore len; DT_STRING renders the bytes as a quoted printable string and
+// DT_AOB renders them as space-separated hex.  Used by the results table and CSV.
+std::string formatTypedValueN(const BYTE* data, size_t len, DataType dt);
 double      valueAsDouble  (const BYTE* data, DataType dt);
+
+// Parse a scan pattern from a ScanParams value: DT_STRING -> raw bytes (mask all
+// true); DT_AOB -> hex bytes with '?'/'??' wildcards (mask false).  Returns false
+// for an empty/invalid pattern.  Only meaningful for DT_STRING / DT_AOB.
+bool parseScanPattern(const std::string& value, DataType dt,
+                      std::vector<BYTE>& pat, std::vector<bool>& mask);
 bool        readTypedValue (LPVOID addr, DataType dt, BYTE out[16]);
 bool        writeTypedValue(LPVOID addr, DataType dt, const std::string& textValue, bool bypassReadOnly, std::string& err);
 
@@ -112,7 +123,7 @@ struct DisasmLine {
     std::vector<BYTE> bytes;
     std::string text;       // mnemonic + ops
 };
-std::string disasmOneAtRemote(LPVOID remoteAddr);                // single instruction at remote address
+std::string disasmOneAtRemote(LPVOID remoteAddr);                
 std::vector<DisasmLine> disasmRangeAtRemote(LPVOID remoteAddr, size_t bytes, size_t maxLines = 256);
 
 // Modules ----------------------------------------------------------------
@@ -212,14 +223,11 @@ struct AutoPtrChain {
 };
 std::vector<AutoPtrChain> autoPointerScan(uintptr_t targetAddr, int maxDepth, intptr_t maxOffset, size_t maxCandidates = 5000);
 
-// --- ADVANCED ---------------------------------------------------------
 
-// Inline assembler (port of legacy AssembleSource - x86-64 subset) -------
 bool assembleSource(const std::string& src, std::vector<BYTE>& out, std::string& err);
 
-// AOB signature generator ------------------------------------------------
 struct AobSignature {
-    std::string pattern;     // "48 8B 05 ?? ?? ?? ?? 48 85 C0"
+    std::string pattern;     
     size_t      length;
     size_t      wildcards;
     size_t      hits;
@@ -227,7 +235,6 @@ struct AobSignature {
 };
 AobSignature generateAobSignature(LPVOID address, size_t minLen = 12, size_t maxLen = 64);
 
-// Live multi-address watch list ------------------------------------------
 struct WatchItem {
     std::string name;
     LPVOID      addr;
@@ -245,7 +252,6 @@ void  watchUpdateAll ();
 bool  watchSave      (const std::string& path);
 bool  watchLoad      (const std::string& path);
 
-// Trampoline hooks -------------------------------------------------------
 struct TrampHook {
     LPVOID            target;       // patched site
     LPVOID            cave;         // VirtualAllocEx region (payload + stolen + return)

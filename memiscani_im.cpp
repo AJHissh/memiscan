@@ -28,9 +28,6 @@ LRESULT WINAPI WndProc(HWND, UINT, WPARAM, LPARAM);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 static void DrawStackSection();
 
-// ============================================================================
-// App state
-// ============================================================================
 struct ScannerCfg {
     int   dtIdx = mem::DT_INT32;
     int   scIdx = mem::SC_EXACT;
@@ -52,6 +49,9 @@ struct ScannerCfg {
     char  maxDBuf[16]  = "100";
     char  rowFilter[64] = "";
     bool  fullscreen = false;
+    bool  showAsText = false;    
+    int   strEncIdx = 2;        
+    bool  strCaseInsensitive = false;  
 };
 
 struct ModulesUI {
@@ -84,7 +84,7 @@ struct CheatsUI {
     int   selected = -1;
     char  nameBuf[128] = "";
     char  hotkeyBuf[16] = "";
-    std::string scriptEdit;     // mirrors selected cheat's script
+    std::string scriptEdit;     
 };
 
 struct DisasmUI {
@@ -94,7 +94,7 @@ struct DisasmUI {
 };
 
 struct CodeInjUI {
-    char    scBuf[1024]  = "";       // hex bytes
+    char    scBuf[1024]  = "";      
     char    caveMin[16]  = "32";
     std::vector<mem::CodeCave> caves;
     std::vector<mem::RemoteThreadEntry> threads;
@@ -569,6 +569,7 @@ static void DoScanAsync(bool first) {
     ScanParams p;
     p.dt = (DataType)gApp.sc.dtIdx; p.sc = (ScanCondition)gApp.sc.scIdx;
     p.value = gApp.sc.valueBuf; p.modFilter = gApp.sc.modFilter;
+    p.strEnc = gApp.sc.strEncIdx; p.strCaseInsensitive = gApp.sc.strCaseInsensitive;
     p.writableOnly = gApp.sc.writableOnly;
     p.skipImage = gApp.sc.skipImage;
     p.executableOnly = gApp.sc.executableOnly;
@@ -590,6 +591,19 @@ static void DoScanAsync(bool first) {
         else       doNextScan(p, err);
         gApp.scanBusy = false;
     });
+}
+
+// Render a byte buffer as a printable ASCII string for the "As Text" result view.
+// Stops at the first NUL (treats the value as a C string); non-printable bytes
+// become '.' so the column stays single-line and readable.
+static std::string resultBytesAsText(const BYTE* b, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = b[i];
+        if (c == 0) break;
+        s += (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+    }
+    return s.empty() ? std::string("(empty)") : s;
 }
 
 static void DrawResultsTable(bool fullscreen) {
@@ -631,9 +645,14 @@ static void DrawResultsTable(bool fullscreen) {
             for (size_t i = 0; i < cap; i++) visibleIdx.push_back(i);
         }
 
+        // String / AOB results occupy a variable number of bytes (the matched
+        // pattern length, recorded per result in g_scan.prevVals).
+        bool patType = (dt == DT_STRING || dt == DT_AOB);
+        bool asText = gApp.sc.showAsText && !patType;   // toggle only affects numeric types
         ImGuiListClipper clipper;
         clipper.Begin((int)visibleIdx.size());
         BYTE cur[16];
+        BYTE wide[256];     // holds string/AOB bytes or the "As Text" peek window
         while (clipper.Step()) {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
                 size_t i = visibleIdx[row];
@@ -641,6 +660,20 @@ static void DrawResultsTable(bool fullscreen) {
                 char addrStr[40]; sprintf(addrStr, "0x%llX", (unsigned long long)(uintptr_t)a);
                 SIZE_T r = 0;
                 bool ok = isAttached() && ReadProcessMemory(processHandle(), a, cur, sz, &r) && r >= sz;
+
+                // How many bytes to read for the wide (string/AOB/text) view.
+                size_t wantW = 0;
+                if (patType) {
+                    wantW = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
+                          ? g_scan.prevVals[i].size() : 16;
+                } else if (asText) {
+                    wantW = sizeof(wide) - 1;
+                }
+                if (wantW > sizeof(wide)) wantW = sizeof(wide);
+                SIZE_T wr = 0;
+                bool okW = wantW && isAttached() &&
+                           ReadProcessMemory(processHandle(), a, wide, wantW, &wr) && wr > 0;
+
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 char idLbl[48]; sprintf(idLbl, "%zu##row%zu", i + 1, i);
@@ -651,7 +684,16 @@ static void DrawResultsTable(bool fullscreen) {
                 if (base) ImGui::Text("+0x%llX", (unsigned long long)((uintptr_t)a - (uintptr_t)base));
                 else      ImGui::TextDisabled("-");
                 ImGui::TableSetColumnIndex(3);
-                if (ok) ImGui::TextColored(clr::ok, "%s", formatTypedValue(cur, dt).c_str()); else ImGui::TextDisabled("?");
+                if (patType) {
+                    if (okW) ImGui::TextColored(clr::ok, "%s", formatTypedValueN(wide, wr, dt).c_str());
+                    else     ImGui::TextDisabled("?");
+                } else if (asText) {
+                    if (okW) ImGui::TextColored(clr::ok, "\"%s\"", resultBytesAsText(wide, wr).c_str());
+                    else     ImGui::TextDisabled("?");
+                } else {
+                    if (ok) ImGui::TextColored(clr::ok, "%s", formatTypedValue(cur, dt).c_str());
+                    else    ImGui::TextDisabled("?");
+                }
                 ImGui::TableSetColumnIndex(4);
                 std::string ds = isAttached() ? disasmOneAtRemote(a) : std::string("(not attached)");
                 ImGui::TextColored(isSel ? clr::accentH : clr::textDim, "%s", ds.c_str());
@@ -685,6 +727,9 @@ static void DrawScannerTab() {
         ImGui::SetNextItemWidth(280);
         ImGui::InputTextWithHint("##rowf", "filter (substring on address)", gApp.sc.rowFilter, sizeof(gApp.sc.rowFilter));
         ImGui::SameLine();
+        ImGui::Checkbox("As Text", &gApp.sc.showAsText);
+        Tip("Show the Value column as printable ASCII text (bytes at each address) instead of the typed/numeric value.");
+        ImGui::SameLine();
         if (ImGui::Button("Exit Fullscreen", ImVec2(140, 0))) gApp.sc.fullscreen = false;
         ImGui::Separator();
         DrawResultsTable(true);
@@ -707,6 +752,16 @@ static void DrawScannerTab() {
     ImGui::SameLine(); ImGui::SetNextItemWidth(220);
     ImGui::InputTextWithHint("##val", "value (0x prefix = hex)", gApp.sc.valueBuf, sizeof(gApp.sc.valueBuf));
     ImGui::SameLine(); ImGui::TextDisabled("Value");
+
+    if (dt == DT_STRING) {
+        const char* encItems[] = { "ASCII/UTF-8", "UTF-16", "Both" };
+        ImGui::SetNextItemWidth(130);
+        ImGui::Combo("Encoding##strenc", &gApp.sc.strEncIdx, encItems, IM_ARRAYSIZE(encItems));
+        Tip("Text encoding to search for.  Many Windows apps (e.g. Notepad) store text as UTF-16.  'Both' searches ASCII and UTF-16 at once - the safe default.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Ignore case", &gApp.sc.strCaseInsensitive);
+        Tip("Match letters regardless of upper/lower case (ASCII letters only).");
+    }
 
     ImGui::Checkbox("Writable", &gApp.sc.writableOnly);
     Tip("Limit scan to writable pages (RW / WC / X+RW).  Default ON.  Drops scan time 5-10x by skipping read-only DLL pages.");
@@ -829,6 +884,9 @@ static void DrawScannerTab() {
     ImGui::InputTextWithHint("##filter", "filter (substring on address)", gApp.sc.rowFilter, sizeof(gApp.sc.rowFilter));
     ImGui::SameLine();
     if (ColorButton("Fullscreen", clr::accent, ImVec2(110, 0))) gApp.sc.fullscreen = true;
+    ImGui::SameLine();
+    ImGui::Checkbox("As Text", &gApp.sc.showAsText);
+    Tip("Show the Value column as printable ASCII text (bytes at each address) instead of the typed/numeric value.");
     ImGui::SameLine();
     ImGui::TextDisabled("shown %zu of %zu  (cap 5000 in UI)", std::min((size_t)5000, g_scan.results.size()), g_scan.results.size());
 

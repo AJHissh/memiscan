@@ -192,6 +192,66 @@ static bool addrInBitmap(const std::vector<uint8_t>& bm, uintptr_t addr) {
     return (bm[off] >> (page & 7)) & 1u;
 }
 
+// ---- String / AOB scan patterns -------------------------------------------
+// One concrete byte pattern to look for (a string in a given encoding, or an AOB).
+struct ScanPat {
+    std::vector<BYTE> bytes;
+    std::vector<bool> mask;   // false at a position = wildcard (AOB '??')
+    bool ci = false;          // case-insensitive ASCII compare (string only)
+};
+
+static inline BYTE foldByte(BYTE b) {
+    return (b >= 'A' && b <= 'Z') ? (BYTE)(b - 'A' + 'a') : b;
+}
+
+static bool matchScanPat(const BYTE* cur, const ScanPat& sp) {
+    for (size_t i = 0; i < sp.bytes.size(); i++) {
+        if (!sp.mask[i]) continue;
+        BYTE c = cur[i], p = sp.bytes[i];
+        if (sp.ci) { c = foldByte(c); p = foldByte(p); }
+        if (c != p) return false;
+    }
+    return true;
+}
+
+// Build the concrete pattern list for a String/AOB scan.  A String produces one
+// pattern per requested encoding (ASCII, UTF-16LE, or both); an AOB produces one.
+// Returns empty if the value is empty/invalid.
+static std::vector<ScanPat> buildScanPatterns(const ScanParams& p) {
+    std::vector<ScanPat> out;
+    if (p.dt == DT_AOB) {
+        ScanPat sp;
+        if (parseScanPattern(p.value, DT_AOB, sp.bytes, sp.mask)) out.push_back(std::move(sp));
+        return out;
+    }
+    if (p.dt == DT_STRING && !p.value.empty()) {
+        if (p.strEnc == 0 || p.strEnc == 2) {        // ASCII / UTF-8 bytes
+            ScanPat sp; sp.ci = p.strCaseInsensitive;
+            sp.bytes.assign(p.value.begin(), p.value.end());
+            sp.mask.assign(sp.bytes.size(), true);
+            out.push_back(std::move(sp));
+        }
+        if (p.strEnc == 1 || p.strEnc == 2) {        // UTF-16LE (e.g. Notepad)
+            ScanPat sp; sp.ci = p.strCaseInsensitive;
+            for (char c : p.value) { sp.bytes.push_back((BYTE)c); sp.bytes.push_back(0); }
+            sp.mask.assign(sp.bytes.size(), true);
+            out.push_back(std::move(sp));
+        }
+    }
+    return out;
+}
+
+// Test every pattern at cur (only those that fit within avail bytes).  On a hit,
+// returns true and sets matchedLen to that pattern's length.
+static bool matchAnyPat(const BYTE* cur, size_t avail,
+                        const std::vector<ScanPat>& pats, size_t& matchedLen) {
+    for (const ScanPat& sp : pats) {
+        if (sp.bytes.size() > avail) continue;
+        if (matchScanPat(cur, sp)) { matchedLen = sp.bytes.size(); return true; }
+    }
+    return false;
+}
+
 bool doFirstScan(const ScanParams& p, std::string& err) {
     if (!s_hProc) { err = "Not attached"; return false; }
     g_scan.results.clear();
@@ -202,7 +262,29 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
 
     BYTE targetBuf[8] = {};
     size_t valSz = dtSize(p.dt);
-    if (p.sc == SC_EXACT && p.dt != DT_STRING && p.dt != DT_AOB) {
+
+    // String / AOB: build the pattern list up front (a string may expand to both
+    // ASCII and UTF-16LE patterns).  minLen drives the scan stride/bounds; the
+    // actual matched length is recorded per result so the UI knows the span.
+    bool patType = (p.dt == DT_STRING || p.dt == DT_AOB);
+    std::vector<ScanPat> pats;
+    size_t minPatLen = 0;
+    if (patType) {
+        pats = buildScanPatterns(p);
+        if (pats.empty()) {
+            err = (p.dt == DT_STRING) ? "Empty string to search for"
+                                      : "Empty or invalid byte pattern (AOB)";
+            g_scanRunning = false;
+            return false;
+        }
+        minPatLen = pats[0].bytes.size();
+        for (const ScanPat& sp : pats) if (sp.bytes.size() < minPatLen) minPatLen = sp.bytes.size();
+    }
+    // Span used for stride / read-bounds / skip-zero (the actual stored length is
+    // the matched pattern's size, set per hit below).
+    size_t matchLen = patType ? minPatLen : valSz;
+
+    if (p.sc == SC_EXACT && !patType) {
         if (p.dt == DT_FLOAT)      { float v=(float)atof(p.value.c_str()); memcpy(targetBuf,&v,4); }
         else if (p.dt == DT_DOUBLE){ double v=atof(p.value.c_str()); memcpy(targetBuf,&v,8); }
         else if (p.dt == DT_INT64) { int64_t v=parseHexAwareInt(p.value.c_str()); memcpy(targetBuf,&v,8); }
@@ -270,7 +352,7 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
             std::vector<BYTE> chunk(chunkSz);
             SIZE_T r = 0;
             if (ReadProcessMemory(s_hProc, mbi.BaseAddress, chunk.data(), chunkSz, &r) && r > 0) {
-                for (SIZE_T i = 0; i + valSz <= r && found < p.maxResults && !g_scanStopRequested; i += step) {
+                for (SIZE_T i = 0; i + matchLen <= r && found < p.maxResults && !g_scanStopRequested; i += step) {
                     uintptr_t fa = (uintptr_t)mbi.BaseAddress + i;
                     if (p.addrMin && fa < p.addrMin) continue;
                     if (p.addrMax && fa > p.addrMax) break;
@@ -281,14 +363,17 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
 
                     if (p.skipZero) {
                         bool isZero = true;
-                        for (size_t k = 0; k < valSz; k++) if (cur[k] != 0) { isZero = false; break; }
+                        for (size_t k = 0; k < matchLen; k++) if (cur[k] != 0) { isZero = false; break; }
                         if (isZero) continue;
                     }
 
                     bool hit = true;
-                    if (p.sc == SC_EXACT && p.dt != DT_AOB && p.dt != DT_STRING)
+                    size_t hitLen = matchLen;   // bytes to store for this result
+                    if (patType)
+                        hit = matchAnyPat(cur, (size_t)(r - i), pats, hitLen);   // string / AOB
+                    else if (p.sc == SC_EXACT)
                         hit = matchesNumericCondition(cur, nullptr, targetBuf, p.dt, p.sc, valSz);
-                    if (hit && (p.hasMin || p.hasMax)) {
+                    if (hit && !patType && (p.hasMin || p.hasMax)) {
                         if (p.dt == DT_FLOAT || p.dt == DT_DOUBLE) {
                             double v = (p.dt == DT_FLOAT) ? (double)*(float*)cur : *(double*)cur;
                             if (p.hasMin && v < p.rminF) hit = false;
@@ -308,7 +393,7 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
                     }
                     if (hit) {
                         g_scan.results.push_back((LPVOID)fa);
-                        g_scan.prevVals.emplace_back(cur, cur + valSz);
+                        g_scan.prevVals.emplace_back(cur, cur + hitLen);
                         found++;
                     }
                 }
@@ -343,6 +428,64 @@ std::string formatTypedValue(const BYTE* data, DataType dt) {
         default:       sprintf(buf, "(non-numeric)"); break;
     }
     return buf;
+}
+
+std::string formatTypedValueN(const BYTE* data, size_t len, DataType dt) {
+    if (dt == DT_STRING) {
+        // len is the exact matched span, so render every byte.  Skip NULs so a
+        // UTF-16 match ("H\0e\0l\0l\0o\0") reads as "Hello", same as ASCII.
+        std::string s = "\"";
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = data[i];
+            if (c == 0) continue;
+            s += (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+        }
+        s += "\"";
+        return s;
+    }
+    if (dt == DT_AOB) {
+        std::string s; char tmp[4];
+        for (size_t i = 0; i < len; i++) { sprintf(tmp, "%02X", data[i]); if (i) s += ' '; s += tmp; }
+        return s.empty() ? std::string("(empty)") : s;
+    }
+    return formatTypedValue(data, dt);
+}
+
+// Parse "48 65 6C" / "48,65,6c" / "0x48 0x65" with '?' or '??' wildcards (AOB),
+// or the literal characters of the value (String).
+bool parseScanPattern(const std::string& value, DataType dt,
+                      std::vector<BYTE>& pat, std::vector<bool>& mask) {
+    pat.clear(); mask.clear();
+    if (dt == DT_STRING) {
+        for (char c : value) { pat.push_back((BYTE)c); mask.push_back(true); }
+        return !pat.empty();
+    }
+    if (dt == DT_AOB) {
+        const char* s = value.c_str();
+        while (*s) {
+            while (*s == ' ' || *s == ',' || *s == '\t') s++;
+            if (!*s) break;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+            if (*s == '?') {
+                pat.push_back(0); mask.push_back(false);
+                s++; if (*s == '?') s++;
+                continue;
+            }
+            auto hexVal = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            int hi = hexVal(s[0]);
+            if (hi < 0) { s++; continue; }      // skip stray junk
+            int lo = hexVal(s[1]);
+            if (lo < 0) { pat.push_back((BYTE)hi); mask.push_back(true); s += 1; }
+            else        { pat.push_back((BYTE)((hi << 4) | lo)); mask.push_back(true); s += 2; }
+        }
+        return !pat.empty();
+    }
+    return false;
 }
 
 double valueAsDouble(const BYTE* data, DataType dt) {
@@ -390,15 +533,25 @@ size_t exportResultsToCsv(const std::string& path, DataType dt) {
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return 0;
     fprintf(f, "index,address,value\r\n");
+    bool patType = (dt == DT_STRING || dt == DT_AOB);
     size_t sz = dtSize(dt);
-    BYTE buf[16];
+    BYTE buf[256];
     for (size_t i = 0; i < g_scan.results.size(); i++) {
         LPVOID a = g_scan.results[i];
         SIZE_T r = 0;
         std::string v = "?";
-        if (s_hProc && ReadProcessMemory(s_hProc, a, buf, sz, &r) && r >= sz)
-            v = formatTypedValue(buf, dt);
-        fprintf(f, "%zu,0x%llX,%s\r\n", i + 1, (unsigned long long)(uintptr_t)a, v.c_str());
+        // For string/AOB read the matched span recorded by the scan; else the type size.
+        size_t want = patType ? (i < g_scan.prevVals.size() ? g_scan.prevVals[i].size() : 0) : sz;
+        if (want == 0) want = sz;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        if (s_hProc && ReadProcessMemory(s_hProc, a, buf, want, &r) && r >= want)
+            v = formatTypedValueN(buf, want, dt);
+        // CSV-quote so embedded commas/quotes in string values don't break columns.
+        std::string cell; cell.reserve(v.size() + 2);
+        cell += '"';
+        for (char c : v) { if (c == '"') cell += '"'; cell += c; }
+        cell += '"';
+        fprintf(f, "%zu,0x%llX,%s\r\n", i + 1, (unsigned long long)(uintptr_t)a, cell.c_str());
     }
     fclose(f);
     return g_scan.results.size();
@@ -458,18 +611,34 @@ bool filterByDiff(DataType dt, int mode, std::string& err) {
 
 // -- Live monitor -------------------------------------------------------
 
+// Bytes to watch for change-detection at result i.  Numeric types use the type
+// size; String/AOB use the matched span, capped at the LiveStat buffer size (16)
+// since min/max/history are fixed-size and the struct is serialized as a blob.
+static size_t liveMonSpan(DataType dt, size_t i) {
+    if (dt == DT_STRING || dt == DT_AOB) {
+        size_t L = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
+                 ? g_scan.prevVals[i].size() : 1;
+        return L > 16 ? 16 : L;
+    }
+    return dtSize(dt);
+}
+
 void liveMonStart(DataType dt) {
     if (!s_hProc || g_scan.results.empty()) return;
+    bool patType = (dt == DT_STRING || dt == DT_AOB);
     g_liveMonDt = dt;
     g_liveStats.assign(g_scan.results.size(), LiveStat{});
-    size_t sz = dtSize(dt);
     for (size_t i = 0; i < g_scan.results.size(); i++) {
+        size_t sz = liveMonSpan(dt, i);
         SIZE_T r = 0;
         ReadProcessMemory(s_hProc, g_scan.results[i], g_liveStats[i].baseline, sz, &r);
         memcpy(g_liveStats[i].last, g_liveStats[i].baseline, sz);
-        memcpy(g_liveStats[i].minV, g_liveStats[i].baseline, sz);
-        memcpy(g_liveStats[i].maxV, g_liveStats[i].baseline, sz);
-        g_liveStats[i].minMaxInit = true;
+        if (!patType) {
+            // min/max only makes sense for numeric values
+            memcpy(g_liveStats[i].minV, g_liveStats[i].baseline, sz);
+            memcpy(g_liveStats[i].maxV, g_liveStats[i].baseline, sz);
+            g_liveStats[i].minMaxInit = true;
+        }
     }
     g_liveMonActive = true;
 }
@@ -481,16 +650,17 @@ void liveMonTick() {
     if (g_liveStats.size() != g_scan.results.size()) { g_liveMonActive = false; return; }
     int dt = g_liveMonDt;
     if (dt < 0) return;
-    size_t sz = dtSize((DataType)dt);
-    size_t hsz = sz > 8 ? 8 : sz;
+    bool patType = (dt == DT_STRING || dt == DT_AOB);
     DWORD now = GetTickCount();
     for (size_t i = 0; i < g_scan.results.size(); i++) {
+        size_t sz = liveMonSpan((DataType)dt, i);
+        size_t hsz = sz > 8 ? 8 : sz;
         BYTE cur[16] = {}; SIZE_T r = 0;
         if (!ReadProcessMemory(s_hProc, g_scan.results[i], cur, sz, &r) || r < sz) continue;
         LiveStat& s = g_liveStats[i];
         s.sampleCount++;
-        // min/max
-        switch ((DataType)dt) {
+        // min/max tracking is numeric-only
+        if (!patType) switch ((DataType)dt) {
             case DT_INT8:  { int8_t  v=*(int8_t*)cur;  if(v<*(int8_t*)s.minV)*(int8_t*)s.minV=v;   if(v>*(int8_t*)s.maxV)*(int8_t*)s.maxV=v;} break;
             case DT_INT16: { int16_t v=*(int16_t*)cur; if(v<*(int16_t*)s.minV)*(int16_t*)s.minV=v; if(v>*(int16_t*)s.maxV)*(int16_t*)s.maxV=v;} break;
             case DT_INT32: { int32_t v=*(int32_t*)cur; if(v<*(int32_t*)s.minV)*(int32_t*)s.minV=v; if(v>*(int32_t*)s.maxV)*(int32_t*)s.maxV=v;} break;
@@ -502,10 +672,12 @@ void liveMonTick() {
         if (memcmp(cur, s.last, sz) != 0) {
             s.changed = true;
             s.changeCount++;
-            double a = valueAsDouble(cur,    (DataType)dt);
-            double b = valueAsDouble(s.last, (DataType)dt);
-            if (a > b) s.increased = true;
-            if (a < b) s.decreased = true;
+            if (!patType) {   // up/down direction is numeric-only
+                double a = valueAsDouble(cur,    (DataType)dt);
+                double b = valueAsDouble(s.last, (DataType)dt);
+                if (a > b) s.increased = true;
+                if (a < b) s.decreased = true;
+            }
             memset(s.history[s.historyHead], 0, 8);
             memcpy(s.history[s.historyHead], cur, hsz);
             s.historyTime[s.historyHead] = now;
@@ -558,14 +730,16 @@ bool filterByLiveChanged(DataType dt, std::string& err) {
         err = "No live-monitor data";
         return false;
     }
+    bool patType = (dt == DT_STRING || dt == DT_AOB);
     size_t sz = dtSize(dt);
     std::vector<LPVOID> next;
     std::vector<std::vector<BYTE>> nextPrev;
     std::vector<LiveStat> nextStats;
     for (size_t i = 0; i < g_scan.results.size(); i++) {
         if (!g_liveStats[i].changed) continue;
+        size_t li = patType ? liveMonSpan(dt, i) : sz;
         next.push_back(g_scan.results[i]);
-        nextPrev.emplace_back(g_liveStats[i].last, g_liveStats[i].last + sz);
+        nextPrev.emplace_back(g_liveStats[i].last, g_liveStats[i].last + li);
         nextStats.push_back(g_liveStats[i]);
     }
     g_scan.results = std::move(next);
@@ -581,6 +755,7 @@ bool filterTopByScore(size_t topN, DataType dt, std::string& err) {
     for (size_t i = 0; i < idx.size(); i++) idx[i] = i;
     std::sort(idx.begin(), idx.end(), [](size_t a, size_t b){ return g_liveStats[a].score > g_liveStats[b].score; });
     if (topN > idx.size()) topN = idx.size();
+    bool patType = (dt == DT_STRING || dt == DT_AOB);
     size_t sz = dtSize(dt);
     std::vector<LPVOID> next;
     std::vector<std::vector<BYTE>> nextPrev;
@@ -588,8 +763,9 @@ bool filterTopByScore(size_t topN, DataType dt, std::string& err) {
     for (size_t k = 0; k < topN; k++) {
         size_t i = idx[k];
         if (g_liveStats[i].score <= 0) break;
+        size_t li = patType ? liveMonSpan(dt, i) : sz;
         next.push_back(g_scan.results[i]);
-        nextPrev.emplace_back(g_liveStats[i].last, g_liveStats[i].last + sz);
+        nextPrev.emplace_back(g_liveStats[i].last, g_liveStats[i].last + li);
         nextStats.push_back(g_liveStats[i]);
     }
     g_scan.results = std::move(next);
@@ -627,7 +803,11 @@ bool doNextScan(const ScanParams& p, std::string& err) {
 
     BYTE targetBuf[8] = {};
     size_t valSz = dtSize(p.dt);
-    if (p.sc == SC_EXACT && p.dt != DT_STRING && p.dt != DT_AOB) {
+    bool patType = (p.dt == DT_STRING || p.dt == DT_AOB);
+    std::vector<ScanPat> pats;
+    if (patType) pats = buildScanPatterns(p);   // for SC_EXACT re-match
+
+    if (p.sc == SC_EXACT && !patType) {
         if (p.dt == DT_FLOAT)      { float v=(float)atof(p.value.c_str()); memcpy(targetBuf,&v,4); }
         else if (p.dt == DT_DOUBLE){ double v=atof(p.value.c_str()); memcpy(targetBuf,&v,8); }
         else if (p.dt == DT_INT64) { int64_t v=parseHexAwareInt(p.value.c_str()); memcpy(targetBuf,&v,8); }
@@ -644,6 +824,34 @@ bool doNextScan(const ScanParams& p, std::string& err) {
     for (size_t i = 0; i < g_scan.results.size(); i++) {
         if (g_scanStopRequested) break;
         LPVOID a = g_scan.results[i];
+
+        if (patType) {
+            // String / AOB refinement.  The matched span is whatever the prior
+            // scan stored for this result (pattern length).
+            size_t mlen = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
+                        ? g_scan.prevVals[i].size()
+                        : (pats.empty() ? 0 : pats[0].bytes.size());
+            if (mlen == 0) continue;
+            std::vector<BYTE> cur(mlen); SIZE_T r = 0;
+            if (!ReadProcessMemory(s_hProc, a, cur.data(), mlen, &r) || r < mlen) continue;
+            const BYTE* prev = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
+                             ? g_scan.prevVals[i].data() : nullptr;
+            bool keep = false;
+            switch (p.sc) {
+                case SC_EXACT: {   // still matches a pattern of this same length?
+                    for (const ScanPat& sp : pats)
+                        if (sp.bytes.size() == mlen && matchScanPat(cur.data(), sp)) { keep = true; break; }
+                    break;
+                }
+                case SC_CHANGED:   keep = prev && memcmp(cur.data(), prev, mlen) != 0; break;
+                case SC_UNCHANGED: keep = prev && memcmp(cur.data(), prev, mlen) == 0; break;
+                case SC_UNKNOWN:   keep = true; break;
+                default:           keep = false; break;   // increased/decreased: N/A for text
+            }
+            if (keep) { next.push_back(a); nextPrev.emplace_back(cur.begin(), cur.end()); }
+            continue;
+        }
+
         BYTE cur[16] = {}; SIZE_T r = 0;
         if (!ReadProcessMemory(s_hProc, a, cur, valSz, &r) || r < valSz) continue;
         const BYTE* prev = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())

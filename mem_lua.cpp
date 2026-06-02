@@ -15,7 +15,6 @@ extern "C" {
 
 namespace memlua {
 
-// -- console output --------------------------------------------------------
 static std::mutex             s_logMtx;
 static std::vector<std::string> s_log;
 static std::atomic<bool>      s_running{false};
