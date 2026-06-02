@@ -19,23 +19,23 @@ enum ScanCondition {
 struct ScanParams {
     DataType  dt        = DT_INT32;
     ScanCondition sc    = SC_EXACT;
-    std::string  value;         
+    std::string  value;
     std::string  modFilter;
     bool         writableOnly  = true;
     bool         skipImage     = false;
-    bool         executableOnly = false;    
-    bool         workingSetOnly = false;     
-    bool         copyOnWriteOnly = false;    
-    uintptr_t    addrMin = 0;                
-    uintptr_t    addrMax = 0;                
-    int          alignment = 0;              
-    bool         skipZero = false;           
-    std::string  skipAddrSuffixHex;          
+    bool         executableOnly = false;
+    bool         workingSetOnly = false;
+    bool         copyOnWriteOnly = false;
+    uintptr_t    addrMin = 0;
+    uintptr_t    addrMax = 0;
+    int          alignment = 0;
+    bool         skipZero = false;
+    std::string  skipAddrSuffixHex;
     bool         hasMin = false; int64_t rmin = 0; double rminF = 0;
     bool         hasMax = false; int64_t rmax = 0; double rmaxF = 0;
     int          maxResults = 100000;
-    int          strEnc = 2;     
-    bool         strCaseInsensitive = false;  
+    int          strEnc = 2;
+    bool         strCaseInsensitive = false;
 };
 
 struct ScanState {
@@ -88,45 +88,35 @@ bool doNextScan (const ScanParams& p, std::string& errOut);
 void clearScan();
 size_t exportResultsToCsv(const std::string& path, DataType dt);
 
-// Snapshot + diff workflow ------------------------------------------------
 void takeSnapshot(DataType dt);
-bool filterByDiff(DataType dt, int mode, std::string& errOut);   // 0=changed 1=unchanged 2=inc 3=dec
+bool filterByDiff(DataType dt, int mode, std::string& errOut);
 
-// Live monitor ------------------------------------------------------------
 void liveMonStart(DataType dt);
 void liveMonStop();
-void liveMonTick();                       // call ~50 ms while active
+void liveMonTick();
 void computeLiveScores(DataType dt);
 bool filterByLiveChanged(DataType dt, std::string& err);
 bool filterTopByScore(size_t topN, DataType dt, std::string& err);
 bool filterByBoundedRange(double maxRange, DataType dt, std::string& err);
 
-// Value formatting / read / write -----------------------------------------
 std::string formatTypedValue(const BYTE* data, DataType dt);
-// Length-aware, human-readable rendering of a value of any type.  Numeric types
-// ignore len; DT_STRING renders the bytes as a quoted printable string and
-// DT_AOB renders them as space-separated hex.  Used by the results table and CSV.
+
 std::string formatTypedValueN(const BYTE* data, size_t len, DataType dt);
 double      valueAsDouble  (const BYTE* data, DataType dt);
 
-// Parse a scan pattern from a ScanParams value: DT_STRING -> raw bytes (mask all
-// true); DT_AOB -> hex bytes with '?'/'??' wildcards (mask false).  Returns false
-// for an empty/invalid pattern.  Only meaningful for DT_STRING / DT_AOB.
 bool parseScanPattern(const std::string& value, DataType dt,
                       std::vector<BYTE>& pat, std::vector<bool>& mask);
 bool        readTypedValue (LPVOID addr, DataType dt, BYTE out[16]);
 bool        writeTypedValue(LPVOID addr, DataType dt, const std::string& textValue, bool bypassReadOnly, std::string& err);
 
-// Zydis ------------------------------------------------------------------
 struct DisasmLine {
     uintptr_t addr;
     std::vector<BYTE> bytes;
-    std::string text;       // mnemonic + ops
+    std::string text;
 };
-std::string disasmOneAtRemote(LPVOID remoteAddr);                
+std::string disasmOneAtRemote(LPVOID remoteAddr);
 std::vector<DisasmLine> disasmRangeAtRemote(LPVOID remoteAddr, size_t bytes, size_t maxLines = 256);
 
-// Modules ----------------------------------------------------------------
 struct ModuleEntry {
     std::string name;
     std::string path;
@@ -137,7 +127,6 @@ std::vector<ModuleEntry> listModules();
 bool injectDLL(const std::string& dllPath, std::string& err);
 bool ejectDLL (const std::string& dllNameSubstr, std::string& err);
 
-// Binary patcher ---------------------------------------------------------
 struct AppliedPatch {
     uintptr_t        addr;
     std::vector<BYTE> original;
@@ -151,11 +140,10 @@ bool patcherNop    (uintptr_t addr, size_t n,  const std::string& label, std::st
 bool patcherNearJmp(uintptr_t addr, uintptr_t target, const std::string& label, std::string& err);
 bool patcherRestore(size_t idx, std::string& err);
 
-// Pointer chains ---------------------------------------------------------
 struct PointerChain {
     std::string name;
-    std::string moduleName;       // e.g. "game.exe" or "" for raw
-    uintptr_t   moduleOffset;     // offset within module
+    std::string moduleName;
+    uintptr_t   moduleOffset;
     std::vector<intptr_t> offsets;
 };
 extern std::vector<PointerChain> g_chains;
@@ -163,7 +151,6 @@ uintptr_t  resolveChain(const PointerChain& c, std::string& err);
 bool       saveChains  (const std::string& path);
 bool       loadChains  (const std::string& path);
 
-// Cheat table (CE-style scripts) -----------------------------------------
 struct CheatEntry {
     std::string name;
     std::string script;
@@ -172,18 +159,16 @@ struct CheatEntry {
 };
 extern std::vector<CheatEntry> g_cheats;
 bool      cheatExecute    (CheatEntry& c, bool enableSection, std::string& err);
-bool      cheatToggle     (size_t idx, std::string& err);   // runs enable or disable based on current state, flips state on success
+bool      cheatToggle     (size_t idx, std::string& err);
 uintptr_t cheatResolveAddr(const std::string& expr);
 bool      saveCheats      (const std::string& path);
 bool      loadCheats      (const std::string& path);
 
-// DLL helpers ------------------------------------------------------------
 HMODULE   findRemoteModuleByName(const std::string& nameSubstr);
 
-// Code injection / caves / remote threads --------------------------------
 struct CodeCave { LPVOID addr; size_t size; DWORD protect; };
 struct RemoteThreadEntry { DWORD tid; LPVOID startAddr; DWORD priority; std::string startModule; uintptr_t startOffset; };
-LPVOID injectShellcode    (const std::vector<BYTE>& sc, std::string& err);   // returns remote address (don't execute)
+LPVOID injectShellcode    (const std::vector<BYTE>& sc, std::string& err);
 bool   injectAndExecute   (const std::vector<BYTE>& sc, std::string& err, DWORD* outTid = nullptr);
 std::vector<CodeCave>          scanCodeCaves   (size_t minSize);
 std::vector<RemoteThreadEntry> listRemoteThreads();
@@ -191,14 +176,12 @@ bool   suspendThread(DWORD tid, std::string& err);
 bool   resumeThread (DWORD tid, std::string& err);
 bool   killThread   (DWORD tid, std::string& err);
 
-// Target windows ---------------------------------------------------------
 struct TargetWindow { HWND hwnd; std::string title; std::string className; bool visible; };
 std::vector<TargetWindow> listTargetWindows();
 bool sendWindowText   (HWND, const std::string& text);
 bool postWindowMessage(HWND, UINT msg, WPARAM wp, LPARAM lp);
 bool windowShow(HWND, int nCmdShow);
 
-// Detection scan ---------------------------------------------------------
 struct DetectFinding {
     std::string category;
     std::string detail;
@@ -207,15 +190,12 @@ struct DetectFinding {
 };
 std::vector<DetectFinding> runDetectionScan(bool rwx, bool privExec, bool threadAnom);
 
-// Trigger ---------------------------------------------------------------
 bool triggerCreateRemoteThread(LPVOID startAddr, LPVOID param, DWORD* outTid, std::string& err);
 bool triggerQueueUserAPC      (DWORD tid, LPVOID startAddr, LPVOID param, std::string& err);
 
-// Module exports --------------------------------------------------------
 struct ExportRow { std::string module; std::string name; LPVOID address; DWORD ordinal; };
 std::vector<ExportRow> enumerateAllExports();
 
-// Auto pointer scan -----------------------------------------------------
 struct AutoPtrChain {
     std::string moduleName;
     uintptr_t   moduleOffset;
@@ -223,11 +203,10 @@ struct AutoPtrChain {
 };
 std::vector<AutoPtrChain> autoPointerScan(uintptr_t targetAddr, int maxDepth, intptr_t maxOffset, size_t maxCandidates = 5000);
 
-
 bool assembleSource(const std::string& src, std::vector<BYTE>& out, std::string& err);
 
 struct AobSignature {
-    std::string pattern;     
+    std::string pattern;
     size_t      length;
     size_t      wildcards;
     size_t      hits;
@@ -253,9 +232,9 @@ bool  watchSave      (const std::string& path);
 bool  watchLoad      (const std::string& path);
 
 struct TrampHook {
-    LPVOID            target;       // patched site
-    LPVOID            cave;         // VirtualAllocEx region (payload + stolen + return)
-    std::vector<BYTE> stolen;       // original bytes (for restore)
+    LPVOID            target;
+    LPVOID            cave;
+    std::vector<BYTE> stolen;
     size_t            stolenLen;
     std::string       label;
 };
@@ -264,11 +243,9 @@ bool installTrampoline(LPVOID target, const std::vector<BYTE>& userPayload,
                        size_t minStolen, const std::string& label, std::string& err);
 bool uninstallTrampoline(size_t idx, std::string& err);
 
-// Memory hex viewer / editor ---------------------------------------------
 bool hexRead (uintptr_t addr, size_t n, std::vector<BYTE>& out, std::string& err);
 bool hexWrite(uintptr_t addr, const std::vector<BYTE>& bytes, bool bypassRO, std::string& err);
 
-// Bookmarks --------------------------------------------------------------
 struct Bookmark {
     std::string name;
     LPVOID      addr;
@@ -281,16 +258,14 @@ void bookmarkRemove(size_t idx);
 bool bookmarkSave  (const std::string& path);
 bool bookmarkLoad  (const std::string& path);
 
-// Auto data-type detection ------------------------------------------------
 struct TypeGuess {
     DataType    dt;
     std::string formatted;
-    float       plausibility;     // 0..1
+    float       plausibility;
     std::string reason;
 };
 std::vector<TypeGuess> guessTypeAt(LPVOID addr);
 
-// PE info viewer ---------------------------------------------------------
 struct PESection {
     std::string name;
     uintptr_t   rva;
@@ -315,33 +290,29 @@ struct PEInfo {
 };
 PEInfo getPEInfo(HMODULE module, const std::string& moduleName);
 
-// Process control --------------------------------------------------------
 extern volatile bool g_processSuspended;
 size_t suspendAllThreads();
 size_t resumeAllThreads();
 
-// Process tree -----------------------------------------------------------
 struct ProcessNode {
     DWORD       pid;
     DWORD       ppid;
     std::string name;
-    int         depth;          // 0 = root, used for indent
+    int         depth;
 };
 std::vector<ProcessNode> listProcessesTree(const std::string& filterSubstr = "");
 
-// Network endpoints ------------------------------------------------------
 struct NetEndpoint {
-    std::string protocol;       // "TCP" / "UDP"
+    std::string protocol;
     std::string localAddr;
     int         localPort;
     std::string remoteAddr;
     int         remotePort;
-    std::string state;          // TCP states or "" for UDP
+    std::string state;
     DWORD       pid;
 };
 std::vector<NetEndpoint> listProcessNetwork(DWORD pid);
 
-// Stack walker -----------------------------------------------------------
 struct StackFrame {
     uintptr_t rip;
     uintptr_t rsp;
@@ -351,7 +322,6 @@ struct StackFrame {
 };
 std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames = 32);
 
-// Hardware breakpoint tracer --------------------------------------------
 enum HwbpType { HWBP_EXECUTE = 0, HWBP_WRITE = 1, HWBP_READWRITE = 3 };
 struct HwbpLogEntry {
     DWORD       tid;
@@ -366,7 +336,6 @@ bool   hwbpEnable (uintptr_t addr, HwbpType type, int size, std::string& err);
 void   hwbpDisable();
 void   hwbpClearLog();
 
-// Verify ---------------------------------------------------------------
 struct VerifySnapshot {
     std::vector<ModuleEntry>             modules;
     std::vector<RemoteThreadEntry>       threads;
@@ -379,9 +348,8 @@ struct VerifyDiff {
 };
 VerifyDiff verifyDiffNow();
 
-// Persistent session ----------------------------------------------------
-extern ScanParams g_lastScanParams;          
+extern ScanParams g_lastScanParams;
 bool saveSession(const std::string& path);
 bool loadSession(const std::string& path);
 
-} 
+}

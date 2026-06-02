@@ -39,7 +39,6 @@ void clearLog() {
 bool isRunning() { return s_running.load(); }
 void requestStop() { s_stopReq = true; }
 
-// -- helpers ---------------------------------------------------------------
 static uintptr_t asAddr(lua_State* L, int idx) {
     if (lua_isinteger(L, idx)) return (uintptr_t)lua_tointeger(L, idx);
     if (lua_isnumber(L, idx))  return (uintptr_t)lua_tonumber(L, idx);
@@ -48,7 +47,7 @@ static uintptr_t asAddr(lua_State* L, int idx) {
     return 0;
 }
 
-static int line_hook_check_stop(lua_State* L, lua_Debug* /*ar*/) {
+static int line_hook_check_stop(lua_State* L, lua_Debug* ) {
     if (s_stopReq.load()) luaL_error(L, "script stopped by user");
     return 0;
 }
@@ -56,14 +55,13 @@ static void install_stop_hook(lua_State* L) {
     lua_sethook(L, (lua_Hook)line_hook_check_stop, LUA_MASKCOUNT, 1000);
 }
 
-// -- bindings --------------------------------------------------------------
 static int l_log(lua_State* L) {
     int n = lua_gettop(L);
     std::string out;
     for (int i = 1; i <= n; i++) {
         if (i > 1) out += "\t";
         size_t len = 0;
-        const char* s = luaL_tolstring(L, i, &len); // converts everything to string
+        const char* s = luaL_tolstring(L, i, &len);
         out.append(s, len);
         lua_pop(L, 1);
     }
@@ -183,7 +181,7 @@ static int l_disasm_range(lua_State* L) {
 
 static int l_aob_scan(lua_State* L) {
     const char* pat = luaL_checkstring(L, 1);
-    // Parse pattern "48 8B ?? ?? ?? ?? 90"
+
     std::vector<BYTE> bytes; std::vector<bool> mask;
     const char* p = pat;
     while (*p) {
@@ -261,7 +259,6 @@ static int l_protect(lua_State* L) {
     return 1;
 }
 
-// -- registration ----------------------------------------------------------
 static const luaL_Reg memlib[] = {
     {"attach",      l_attach},
     {"detach",      l_detach},
@@ -300,7 +297,6 @@ static const luaL_Reg memlib[] = {
     {NULL, NULL}
 };
 
-// Custom Lua print() -> our log
 static int lua_print_to_log(lua_State* L) {
     int n = lua_gettop(L);
     std::string out;
@@ -315,7 +311,6 @@ static int lua_print_to_log(lua_State* L) {
     return 0;
 }
 
-// Public API
 bool runScript(const std::string& source) {
     if (s_running.load()) return false;
     if (s_thread.joinable()) s_thread.join();
@@ -325,15 +320,15 @@ bool runScript(const std::string& source) {
         lua_State* L = luaL_newstate();
         { std::lock_guard<std::mutex> lk(s_LMtx); s_L = L; }
         luaL_openlibs(L);
-        // Override print
+
         lua_pushcfunction(L, lua_print_to_log);
         lua_setglobal(L, "print");
         lua_pushcfunction(L, l_log);
         lua_setglobal(L, "log");
-        // Register mem.* table
+
         luaL_newlib(L, memlib);
         lua_setglobal(L, "mem");
-        // Constants for protection flags
+
         lua_newtable(L);
 #define K(name, v) do { lua_pushinteger(L, v); lua_setfield(L, -2, name); } while(0)
         K("PAGE_NOACCESS",          PAGE_NOACCESS);
@@ -373,4 +368,4 @@ void shutdown() {
     if (s_thread.joinable()) s_thread.join();
 }
 
-} 
+}

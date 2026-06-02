@@ -1,4 +1,4 @@
-#include <winsock2.h>    
+#include <winsock2.h>
 #include "memcore.h"
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -157,14 +157,13 @@ static bool matchesNumericCondition(const BYTE* cur, const BYTE* prev,
 }
 
 static std::vector<uint8_t> buildWorkingSetBitmap(uintptr_t addrMax, bool& ok) {
-    // Returns a bitmap indexed by (page_addr >> 12).  bit set = page in WS.
-    // Sized to cover all of user-mode address space we may scan.
+
     ok = false;
     std::vector<uint8_t> bm;
     if (!s_hProc) return bm;
-    // Allocate based on upper limit (cap at user-mode 128 TiB just in case)
+
     uintptr_t maxPages = (addrMax ? addrMax : 0x7FFFFFFFFFFFULL) >> 12;
-    if (maxPages > (1ULL << 31)) maxPages = (1ULL << 31); // 256 MB bitmap cap
+    if (maxPages > (1ULL << 31)) maxPages = (1ULL << 31);
     bm.assign((size_t)((maxPages + 7) / 8), 0);
     std::vector<BYTE> buf(64 * 1024);
     while (true) {
@@ -174,7 +173,7 @@ static std::vector<uint8_t> buildWorkingSetBitmap(uintptr_t addrMax, bool& ok) {
             buf.resize(buf.size() * 2);
             continue;
         }
-        return bm;  // failure -> empty bitmap
+        return bm;
     }
     PSAPI_WORKING_SET_INFORMATION* wsi = (PSAPI_WORKING_SET_INFORMATION*)buf.data();
     for (ULONG_PTR i = 0; i < wsi->NumberOfEntries; i++) {
@@ -192,12 +191,10 @@ static bool addrInBitmap(const std::vector<uint8_t>& bm, uintptr_t addr) {
     return (bm[off] >> (page & 7)) & 1u;
 }
 
-// ---- String / AOB scan patterns -------------------------------------------
-// One concrete byte pattern to look for (a string in a given encoding, or an AOB).
 struct ScanPat {
     std::vector<BYTE> bytes;
-    std::vector<bool> mask;   // false at a position = wildcard (AOB '??')
-    bool ci = false;          // case-insensitive ASCII compare (string only)
+    std::vector<bool> mask;
+    bool ci = false;
 };
 
 static inline BYTE foldByte(BYTE b) {
@@ -214,9 +211,6 @@ static bool matchScanPat(const BYTE* cur, const ScanPat& sp) {
     return true;
 }
 
-// Build the concrete pattern list for a String/AOB scan.  A String produces one
-// pattern per requested encoding (ASCII, UTF-16LE, or both); an AOB produces one.
-// Returns empty if the value is empty/invalid.
 static std::vector<ScanPat> buildScanPatterns(const ScanParams& p) {
     std::vector<ScanPat> out;
     if (p.dt == DT_AOB) {
@@ -225,13 +219,13 @@ static std::vector<ScanPat> buildScanPatterns(const ScanParams& p) {
         return out;
     }
     if (p.dt == DT_STRING && !p.value.empty()) {
-        if (p.strEnc == 0 || p.strEnc == 2) {        // ASCII / UTF-8 bytes
+        if (p.strEnc == 0 || p.strEnc == 2) {
             ScanPat sp; sp.ci = p.strCaseInsensitive;
             sp.bytes.assign(p.value.begin(), p.value.end());
             sp.mask.assign(sp.bytes.size(), true);
             out.push_back(std::move(sp));
         }
-        if (p.strEnc == 1 || p.strEnc == 2) {        // UTF-16LE (e.g. Notepad)
+        if (p.strEnc == 1 || p.strEnc == 2) {
             ScanPat sp; sp.ci = p.strCaseInsensitive;
             for (char c : p.value) { sp.bytes.push_back((BYTE)c); sp.bytes.push_back(0); }
             sp.mask.assign(sp.bytes.size(), true);
@@ -241,8 +235,6 @@ static std::vector<ScanPat> buildScanPatterns(const ScanParams& p) {
     return out;
 }
 
-// Test every pattern at cur (only those that fit within avail bytes).  On a hit,
-// returns true and sets matchedLen to that pattern's length.
 static bool matchAnyPat(const BYTE* cur, size_t avail,
                         const std::vector<ScanPat>& pats, size_t& matchedLen) {
     for (const ScanPat& sp : pats) {
@@ -263,9 +255,6 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
     BYTE targetBuf[8] = {};
     size_t valSz = dtSize(p.dt);
 
-    // String / AOB: build the pattern list up front (a string may expand to both
-    // ASCII and UTF-16LE patterns).  minLen drives the scan stride/bounds; the
-    // actual matched length is recorded per result so the UI knows the span.
     bool patType = (p.dt == DT_STRING || p.dt == DT_AOB);
     std::vector<ScanPat> pats;
     size_t minPatLen = 0;
@@ -280,8 +269,7 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
         minPatLen = pats[0].bytes.size();
         for (const ScanPat& sp : pats) if (sp.bytes.size() < minPatLen) minPatLen = sp.bytes.size();
     }
-    // Span used for stride / read-bounds / skip-zero (the actual stored length is
-    // the matched pattern's size, set per hit below).
+
     size_t matchLen = patType ? minPatLen : valSz;
 
     if (p.sc == SC_EXACT && !patType) {
@@ -315,17 +303,15 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
                    PAGE_READONLY | PAGE_EXECUTE_READ;
     }
 
-    // Working-set page bitmap (only build if requested)
     std::vector<uint8_t> wsBitmap;
     bool wsBitmapValid = false;
     if (p.workingSetOnly) wsBitmap = buildWorkingSetBitmap(p.addrMax, wsBitmapValid);
 
-    // Address-suffix skip parsing
     uintptr_t suffixMask = 0, suffixPat = 0;
     bool wantSuffixSkip = false;
     if (!p.skipAddrSuffixHex.empty()) {
         std::string s = p.skipAddrSuffixHex;
-        // Trim leading "0x" if present
+
         if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s = s.substr(2);
         if (!s.empty() && s.size() <= 16) {
             char* ep = nullptr;
@@ -368,9 +354,9 @@ bool doFirstScan(const ScanParams& p, std::string& err) {
                     }
 
                     bool hit = true;
-                    size_t hitLen = matchLen;   // bytes to store for this result
+                    size_t hitLen = matchLen;
                     if (patType)
-                        hit = matchAnyPat(cur, (size_t)(r - i), pats, hitLen);   // string / AOB
+                        hit = matchAnyPat(cur, (size_t)(r - i), pats, hitLen);
                     else if (p.sc == SC_EXACT)
                         hit = matchesNumericCondition(cur, nullptr, targetBuf, p.dt, p.sc, valSz);
                     if (hit && !patType && (p.hasMin || p.hasMax)) {
@@ -432,8 +418,7 @@ std::string formatTypedValue(const BYTE* data, DataType dt) {
 
 std::string formatTypedValueN(const BYTE* data, size_t len, DataType dt) {
     if (dt == DT_STRING) {
-        // len is the exact matched span, so render every byte.  Skip NULs so a
-        // UTF-16 match ("H\0e\0l\0l\0o\0") reads as "Hello", same as ASCII.
+
         std::string s = "\"";
         for (size_t i = 0; i < len; i++) {
             unsigned char c = data[i];
@@ -451,8 +436,6 @@ std::string formatTypedValueN(const BYTE* data, size_t len, DataType dt) {
     return formatTypedValue(data, dt);
 }
 
-// Parse "48 65 6C" / "48,65,6c" / "0x48 0x65" with '?' or '??' wildcards (AOB),
-// or the literal characters of the value (String).
 bool parseScanPattern(const std::string& value, DataType dt,
                       std::vector<BYTE>& pat, std::vector<bool>& mask) {
     pat.clear(); mask.clear();
@@ -478,7 +461,7 @@ bool parseScanPattern(const std::string& value, DataType dt,
                 return -1;
             };
             int hi = hexVal(s[0]);
-            if (hi < 0) { s++; continue; }      // skip stray junk
+            if (hi < 0) { s++; continue; }
             int lo = hexVal(s[1]);
             if (lo < 0) { pat.push_back((BYTE)hi); mask.push_back(true); s += 1; }
             else        { pat.push_back((BYTE)((hi << 4) | lo)); mask.push_back(true); s += 2; }
@@ -540,13 +523,13 @@ size_t exportResultsToCsv(const std::string& path, DataType dt) {
         LPVOID a = g_scan.results[i];
         SIZE_T r = 0;
         std::string v = "?";
-        // For string/AOB read the matched span recorded by the scan; else the type size.
+
         size_t want = patType ? (i < g_scan.prevVals.size() ? g_scan.prevVals[i].size() : 0) : sz;
         if (want == 0) want = sz;
         if (want > sizeof(buf)) want = sizeof(buf);
         if (s_hProc && ReadProcessMemory(s_hProc, a, buf, want, &r) && r >= want)
             v = formatTypedValueN(buf, want, dt);
-        // CSV-quote so embedded commas/quotes in string values don't break columns.
+
         std::string cell; cell.reserve(v.size() + 2);
         cell += '"';
         for (char c : v) { if (c == '"') cell += '"'; cell += c; }
@@ -556,8 +539,6 @@ size_t exportResultsToCsv(const std::string& path, DataType dt) {
     fclose(f);
     return g_scan.results.size();
 }
-
-// -- Snapshot / diff -----------------------------------------------------
 
 void takeSnapshot(DataType dt) {
     if (!s_hProc || g_scan.results.empty()) return;
@@ -609,11 +590,6 @@ bool filterByDiff(DataType dt, int mode, std::string& err) {
     return true;
 }
 
-// -- Live monitor -------------------------------------------------------
-
-// Bytes to watch for change-detection at result i.  Numeric types use the type
-// size; String/AOB use the matched span, capped at the LiveStat buffer size (16)
-// since min/max/history are fixed-size and the struct is serialized as a blob.
 static size_t liveMonSpan(DataType dt, size_t i) {
     if (dt == DT_STRING || dt == DT_AOB) {
         size_t L = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
@@ -634,7 +610,7 @@ void liveMonStart(DataType dt) {
         ReadProcessMemory(s_hProc, g_scan.results[i], g_liveStats[i].baseline, sz, &r);
         memcpy(g_liveStats[i].last, g_liveStats[i].baseline, sz);
         if (!patType) {
-            // min/max only makes sense for numeric values
+
             memcpy(g_liveStats[i].minV, g_liveStats[i].baseline, sz);
             memcpy(g_liveStats[i].maxV, g_liveStats[i].baseline, sz);
             g_liveStats[i].minMaxInit = true;
@@ -659,7 +635,7 @@ void liveMonTick() {
         if (!ReadProcessMemory(s_hProc, g_scan.results[i], cur, sz, &r) || r < sz) continue;
         LiveStat& s = g_liveStats[i];
         s.sampleCount++;
-        // min/max tracking is numeric-only
+
         if (!patType) switch ((DataType)dt) {
             case DT_INT8:  { int8_t  v=*(int8_t*)cur;  if(v<*(int8_t*)s.minV)*(int8_t*)s.minV=v;   if(v>*(int8_t*)s.maxV)*(int8_t*)s.maxV=v;} break;
             case DT_INT16: { int16_t v=*(int16_t*)cur; if(v<*(int16_t*)s.minV)*(int16_t*)s.minV=v; if(v>*(int16_t*)s.maxV)*(int16_t*)s.maxV=v;} break;
@@ -672,7 +648,7 @@ void liveMonTick() {
         if (memcmp(cur, s.last, sz) != 0) {
             s.changed = true;
             s.changeCount++;
-            if (!patType) {   // up/down direction is numeric-only
+            if (!patType) {
                 double a = valueAsDouble(cur,    (DataType)dt);
                 double b = valueAsDouble(s.last, (DataType)dt);
                 if (a > b) s.increased = true;
@@ -805,7 +781,7 @@ bool doNextScan(const ScanParams& p, std::string& err) {
     size_t valSz = dtSize(p.dt);
     bool patType = (p.dt == DT_STRING || p.dt == DT_AOB);
     std::vector<ScanPat> pats;
-    if (patType) pats = buildScanPatterns(p);   // for SC_EXACT re-match
+    if (patType) pats = buildScanPatterns(p);
 
     if (p.sc == SC_EXACT && !patType) {
         if (p.dt == DT_FLOAT)      { float v=(float)atof(p.value.c_str()); memcpy(targetBuf,&v,4); }
@@ -826,8 +802,7 @@ bool doNextScan(const ScanParams& p, std::string& err) {
         LPVOID a = g_scan.results[i];
 
         if (patType) {
-            // String / AOB refinement.  The matched span is whatever the prior
-            // scan stored for this result (pattern length).
+
             size_t mlen = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
                         ? g_scan.prevVals[i].size()
                         : (pats.empty() ? 0 : pats[0].bytes.size());
@@ -838,7 +813,7 @@ bool doNextScan(const ScanParams& p, std::string& err) {
                              ? g_scan.prevVals[i].data() : nullptr;
             bool keep = false;
             switch (p.sc) {
-                case SC_EXACT: {   // still matches a pattern of this same length?
+                case SC_EXACT: {
                     for (const ScanPat& sp : pats)
                         if (sp.bytes.size() == mlen && matchScanPat(cur.data(), sp)) { keep = true; break; }
                     break;
@@ -846,7 +821,7 @@ bool doNextScan(const ScanParams& p, std::string& err) {
                 case SC_CHANGED:   keep = prev && memcmp(cur.data(), prev, mlen) != 0; break;
                 case SC_UNCHANGED: keep = prev && memcmp(cur.data(), prev, mlen) == 0; break;
                 case SC_UNKNOWN:   keep = true; break;
-                default:           keep = false; break;   // increased/decreased: N/A for text
+                default:           keep = false; break;
             }
             if (keep) { next.push_back(a); nextPrev.emplace_back(cur.begin(), cur.end()); }
             continue;
@@ -866,10 +841,6 @@ bool doNextScan(const ScanParams& p, std::string& err) {
     g_scanRunning = false;
     return true;
 }
-
-// ========================================================================
-// Zydis disasm
-// ========================================================================
 
 static ZydisDecoder& zydisDecoder() {
     static ZydisDecoder d;
@@ -919,10 +890,6 @@ std::vector<DisasmLine> disasmRangeAtRemote(LPVOID remoteAddr, size_t nBytes, si
     }
     return out;
 }
-
-// ========================================================================
-// Modules
-// ========================================================================
 
 std::vector<ModuleEntry> listModules() {
     std::vector<ModuleEntry> out;
@@ -999,10 +966,6 @@ bool ejectDLL(const std::string& sub, std::string& err) {
     return true;
 }
 
-// ========================================================================
-// Binary patcher
-// ========================================================================
-
 std::vector<AppliedPatch> g_patches;
 
 static bool writeWithProtect(uintptr_t addr, const BYTE* data, size_t n, std::string& err) {
@@ -1062,10 +1025,6 @@ bool patcherRestore(size_t idx, std::string& err) {
     g_patches.erase(g_patches.begin() + idx);
     return true;
 }
-
-// ========================================================================
-// Pointer chains
-// ========================================================================
 
 std::vector<PointerChain> g_chains;
 
@@ -1131,10 +1090,6 @@ bool loadChains(const std::string& path) {
     }
     fclose(f); return true;
 }
-
-// ========================================================================
-// Cheat scripts
-// ========================================================================
 
 std::vector<CheatEntry> g_cheats;
 
@@ -1307,10 +1262,6 @@ bool loadCheats(const std::string& path) {
     return true;
 }
 
-// ========================================================================
-// Code injection / caves / remote threads
-// ========================================================================
-
 LPVOID injectShellcode(const std::vector<BYTE>& sc, std::string& err) {
     if (!s_hProc) { err = "Not attached"; return NULL; }
     if (sc.empty()) { err = "Empty shellcode"; return NULL; }
@@ -1391,12 +1342,12 @@ std::vector<RemoteThreadEntry> listRemoteThreads() {
                     PFN_NtQIT pNtQIT = nt ? (PFN_NtQIT)GetProcAddress(nt, "NtQueryInformationThread") : nullptr;
                     if (pNtQIT) {
                         ULONG_PTR start = 0;
-                        if (pNtQIT(th, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), NULL) == 0)
+                        if (pNtQIT(th, 9 , &start, sizeof(start), NULL) == 0)
                             e.startAddr = (LPVOID)start;
                     }
                     CloseHandle(th);
                 }
-                // Resolve start address to module
+
                 e.startOffset = 0;
                 if (e.startAddr) {
                     HMODULE mods[1024]; DWORD cb = 0;
@@ -1447,9 +1398,6 @@ bool killThread(DWORD tid, std::string& err) {
     return ok;
 }
 
-// ========================================================================
-// Target windows
-// ========================================================================
 struct WndEnumCtx { DWORD pid; std::vector<TargetWindow>* out; };
 static BOOL CALLBACK WndEnumProc(HWND hWnd, LPARAM lp) {
     WndEnumCtx* c = (WndEnumCtx*)lp;
@@ -1480,9 +1428,6 @@ bool postWindowMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 bool windowShow(HWND hWnd, int nCmd) { return !!ShowWindow(hWnd, nCmd); }
 
-// ========================================================================
-// Detection scan
-// ========================================================================
 std::vector<DetectFinding> runDetectionScan(bool wantRwx, bool wantPrivExec, bool wantThreadAnom) {
     std::vector<DetectFinding> out;
     if (!s_hProc) return out;
@@ -1527,9 +1472,6 @@ std::vector<DetectFinding> runDetectionScan(bool wantRwx, bool wantPrivExec, boo
     return out;
 }
 
-// ========================================================================
-// Trigger
-// ========================================================================
 bool triggerCreateRemoteThread(LPVOID startAddr, LPVOID param, DWORD* outTid, std::string& err) {
     if (!s_hProc) { err = "Not attached"; return false; }
     DWORD tid = 0;
@@ -1548,9 +1490,6 @@ bool triggerQueueUserAPC(DWORD tid, LPVOID startAddr, LPVOID param, std::string&
     return true;
 }
 
-// ========================================================================
-// Module exports
-// ========================================================================
 static std::vector<ExportRow> dumpExports(HMODULE mod, const std::string& modName) {
     std::vector<ExportRow> out;
     if (!s_hProc || !mod) return out;
@@ -1604,16 +1543,12 @@ std::vector<ExportRow> enumerateAllExports() {
     return out;
 }
 
-// ========================================================================
-// Auto pointer scanner (depth-N, capped candidates)
-// ========================================================================
 std::vector<AutoPtrChain> autoPointerScan(uintptr_t target, int maxDepth, intptr_t maxOff, size_t maxCandidates) {
     std::vector<AutoPtrChain> out;
     if (!s_hProc) return out;
     if (maxDepth < 1) maxDepth = 1; if (maxDepth > 5) maxDepth = 5;
     if (maxOff < 0x10) maxOff = 0x10; if (maxOff > 0x10000) maxOff = 0x10000;
 
-    // Module ranges (image regions, used to detect "static" roots)
     struct ModRng { uintptr_t base, end; std::string name; };
     std::vector<ModRng> modRanges;
     {
@@ -1633,7 +1568,6 @@ std::vector<AutoPtrChain> autoPointerScan(uintptr_t target, int maxDepth, intptr
         return false;
     };
 
-    // Snapshot all readable memory
     struct Page { uintptr_t base; std::vector<BYTE> data; };
     std::vector<Page> pages;
     size_t totalRead = 0;
@@ -1664,7 +1598,7 @@ std::vector<AutoPtrChain> autoPointerScan(uintptr_t target, int maxDepth, intptr
     for (int d = 0; d < maxDepth; d++) {
         std::vector<Candidate> next;
         for (const auto& cand : level) {
-            // For each page, scan qwords (aligned)
+
             for (const auto& pg : pages) {
                 size_t n = pg.data.size();
                 if (n < 8) continue;
@@ -1704,9 +1638,6 @@ std::vector<AutoPtrChain> autoPointerScan(uintptr_t target, int maxDepth, intptr
     return out;
 }
 
-// ========================================================================
-// Verify snapshot / diff
-// ========================================================================
 VerifySnapshot g_verify;
 
 void takeVerifySnapshot() {
@@ -1714,9 +1645,6 @@ void takeVerifySnapshot() {
     g_verify.threads = listRemoteThreads();
 }
 
-// ========================================================================
-// Inline assembler (ported from legacy)
-// ========================================================================
 namespace asmx {
     static std::string trim(const std::string& s){
         size_t st=s.find_first_not_of(" \t\r\n");
@@ -1827,7 +1755,7 @@ namespace asmx {
         }
         return"Unknown or unsupported instruction: "+mn;
     }
-} // namespace asmx
+}
 
 bool assembleSource(const std::string& src, std::vector<BYTE>& out, std::string& err) {
     out.clear();
@@ -1914,9 +1842,6 @@ bool assembleSource(const std::string& src, std::vector<BYTE>& out, std::string&
     return !out.empty();
 }
 
-// ========================================================================
-// AOB signature generator
-// ========================================================================
 static bool aobScanForFirstMatch(const std::vector<BYTE>& pat, const std::vector<bool>& mask,
                                  size_t& outHits, size_t maxScan = 256 * 1024 * 1024) {
     if (!s_hProc) return false;
@@ -1955,23 +1880,21 @@ AobSignature generateAobSignature(LPVOID address, size_t minLen, size_t maxLen) 
     if (minLen < 4) minLen = 4;
     if (maxLen > 96) maxLen = 96;
 
-    // Read enough bytes for decoding
     std::vector<BYTE> buf(maxLen + 32);
     SIZE_T r = 0;
     if (!ReadProcessMemory(s_hProc, address, buf.data(), buf.size(), &r) || r < minLen)
         return sig;
     buf.resize(r);
 
-    // Walk instructions, mark bytes as wildcards where they could be relocatable
     std::vector<bool> wildcard(buf.size(), false);
     size_t pos = 0;
     while (pos < buf.size() && pos < maxLen) {
         ZydisDecodedInstruction ins; ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
         if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&zydisDecoder(), buf.data() + pos, buf.size() - pos, &ins, ops))) break;
-        // Mark RIP-relative displacement bytes as wildcards
+
         if (ins.raw.disp.offset && ins.raw.disp.size) {
-            for (int b = 0; b < ops[0].element_count; b++) {} // noop
-            // Check if any operand is RIP-relative memory
+            for (int b = 0; b < ops[0].element_count; b++) {}
+
             for (int i = 0; i < ins.operand_count; i++) {
                 if (ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
                     ops[i].mem.base == ZYDIS_REGISTER_RIP) {
@@ -1983,7 +1906,7 @@ AobSignature generateAobSignature(LPVOID address, size_t minLen, size_t maxLen) 
                 }
             }
         }
-        // Mark relative immediates (call/jmp) as wildcards
+
         if (ins.raw.imm[0].offset && ins.raw.imm[0].is_relative) {
             size_t immOff = pos + ins.raw.imm[0].offset;
             size_t immSz  = ins.raw.imm[0].size / 8;
@@ -1994,7 +1917,6 @@ AobSignature generateAobSignature(LPVOID address, size_t minLen, size_t maxLen) 
     }
     if (pos < minLen) pos = std::min(buf.size(), maxLen);
 
-    // Try lengths from minLen up, expand until unique (single hit)
     AobSignature best{};
     best.pattern = "(no unique pattern found)";
     for (size_t L = minLen; L <= pos; L++) {
@@ -2003,7 +1925,7 @@ AobSignature generateAobSignature(LPVOID address, size_t minLen, size_t maxLen) 
         size_t hits = 0;
         aobScanForFirstMatch(pat, mask, hits);
         if (hits <= 1) {
-            // Build pattern string
+
             std::string s;
             size_t wc = 0;
             char tmp[8];
@@ -2023,9 +1945,6 @@ AobSignature generateAobSignature(LPVOID address, size_t minLen, size_t maxLen) 
     return best;
 }
 
-// ========================================================================
-// Live watch list
-// ========================================================================
 std::vector<WatchItem> g_watch;
 
 void watchAdd(const std::string& name, LPVOID addr, DataType dt) {
@@ -2079,9 +1998,6 @@ bool watchLoad(const std::string& path) {
     fclose(f); return true;
 }
 
-// ========================================================================
-// Trampoline hooks (ported from legacy)
-// ========================================================================
 std::vector<TrampHook> g_thooks;
 
 static bool relocateInsts(const BYTE* orig, size_t origLen,
@@ -2186,7 +2102,7 @@ bool installTrampoline(LPVOID target, const std::vector<BYTE>& userPayload, size
         VirtualFreeEx(s_hProc, cave, 0, MEM_RELEASE); return false;
     }
     caveBytes.insert(caveBytes.end(), relocated.begin(), relocated.end());
-    // append abs JMP back to target+boundary
+
     caveBytes.push_back(0xFF); caveBytes.push_back(0x25);
     for (int b = 0; b < 4; b++) caveBytes.push_back(0);
     uintptr_t ret = (uintptr_t)target + boundary;
@@ -2195,7 +2111,7 @@ bool installTrampoline(LPVOID target, const std::vector<BYTE>& userPayload, size
     if (!WriteProcessMemory(s_hProc, cave, caveBytes.data(), caveBytes.size(), &wr) || wr != caveBytes.size()) {
         err = "Write cave failed"; VirtualFreeEx(s_hProc, cave, 0, MEM_RELEASE); return false;
     }
-    // Splice at target: abs JMP to cave + NOP padding
+
     std::vector<BYTE> splice(boundary, 0x90);
     splice[0] = 0xFF; splice[1] = 0x25;
     for (int b = 0; b < 4; b++) splice[2+b] = 0;
@@ -2220,9 +2136,6 @@ bool uninstallTrampoline(size_t idx, std::string& err) {
     return true;
 }
 
-// ========================================================================
-// Hardware breakpoint tracer  (DebugActiveProcess + DR0/DR7 manipulation)
-// ========================================================================
 volatile bool             g_hwbpActive = false;
 std::vector<HwbpLogEntry> g_hwbpLog;
 uintptr_t                 g_hwbpWatchAddr = 0;
@@ -2240,14 +2153,14 @@ static void applyDr(HANDLE thread, uintptr_t addr, bool enable, int type, int si
     if (!GetThreadContext(thread, &ctx)) return;
     if (!enable) {
         ctx.Dr0 = 0;
-        ctx.Dr7 &= ~((DWORD64)1);                // disable DR0 (L0)
-        ctx.Dr7 &= ~((DWORD64)0xF << 16);        // clear type/length for DR0
+        ctx.Dr7 &= ~((DWORD64)1);
+        ctx.Dr7 &= ~((DWORD64)0xF << 16);
     } else {
         ctx.Dr0 = (DWORD64)addr;
         DWORD64 dr7 = ctx.Dr7;
-        dr7 |= 1;                                 // L0 (DR0 enabled, locally)
-        dr7 &= ~((DWORD64)0xF << 16);             // clear DR0 type/length nibble
-        DWORD typeBits = (DWORD)type;             // 0=exec, 1=write, 3=rw
+        dr7 |= 1;
+        dr7 &= ~((DWORD64)0xF << 16);
+        DWORD typeBits = (DWORD)type;
         DWORD lenBits;
         switch (size) { case 1: lenBits=0; break; case 2: lenBits=1; break; case 4: lenBits=3; break; case 8: lenBits=2; break; default: lenBits=3; }
         dr7 |= ((DWORD64)(typeBits | (lenBits<<2))) << 16;
@@ -2291,7 +2204,7 @@ static DWORD WINAPI hwbpThreadProc(LPVOID) {
                 if (th) {
                     CONTEXT ctx{}; ctx.ContextFlags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
                     if (GetThreadContext(th, &ctx)) {
-                        if (ctx.Dr6 & 0x1) {        // DR0 hit
+                        if (ctx.Dr6 & 0x1) {
                             HwbpLogEntry e;
                             e.tid = ev.dwThreadId;
                             e.offenderRip = (uintptr_t)ctx.Rip;
@@ -2299,7 +2212,7 @@ static DWORD WINAPI hwbpThreadProc(LPVOID) {
                             e.timeMs = GetTickCount();
                             if (g_hwbpLog.size() < 2000) g_hwbpLog.push_back(e);
                             ctx.Dr6 = 0;
-                            // Set RF in EFlags so the instruction completes without re-triggering
+
                             ctx.EFlags |= 0x10000;
                             SetThreadContext(th, &ctx);
                         }
@@ -2307,12 +2220,12 @@ static DWORD WINAPI hwbpThreadProc(LPVOID) {
                     CloseHandle(th);
                 }
             } else if (code == EXCEPTION_BREAKPOINT) {
-                // initial bp from DebugActiveProcess - just continue
+
             } else {
                 cont = DBG_EXCEPTION_NOT_HANDLED;
             }
         } else if (ev.dwDebugEventCode == CREATE_THREAD_DEBUG_EVENT) {
-            // Apply DR0 to new thread
+
             HANDLE th = OpenThread(THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_SUSPEND_RESUME, FALSE, ev.dwThreadId);
             if (th) { SuspendThread(th); applyDr(th, g_hwbpWatchAddr, true, s_hwbpType, s_hwbpSize); ResumeThread(th); CloseHandle(th); }
         } else if (ev.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT) {
@@ -2349,9 +2262,6 @@ void hwbpDisable() {
     g_hwbpActive = false;
 }
 
-// ========================================================================
-// Memory hex viewer
-// ========================================================================
 bool hexRead(uintptr_t addr, size_t n, std::vector<BYTE>& out, std::string& err) {
     if (!s_hProc) { err = "Not attached"; return false; }
     if (n == 0 || n > 1024 * 1024) { err = "Bad size"; return false; }
@@ -2373,9 +2283,6 @@ bool hexWrite(uintptr_t addr, const std::vector<BYTE>& bytes, bool bypassRO, std
     return true;
 }
 
-// ========================================================================
-// Bookmarks
-// ========================================================================
 std::vector<Bookmark> g_bookmarks;
 void bookmarkAdd(const std::string& name, LPVOID addr, DataType dt, const std::string& note) {
     Bookmark b; b.name = name.empty() ? "(unnamed)" : name;
@@ -2387,7 +2294,7 @@ bool bookmarkSave(const std::string& path) {
     FILE* f = nullptr; if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
     fprintf(f, "# memiscani bookmarks v1\n");
     for (const auto& b : g_bookmarks) {
-        // Escape pipes in name/note
+
         std::string n = b.name, no = b.note;
         for (char& c : n)  if (c == '|') c = ' ';
         for (char& c : no) if (c == '|') c = ' ';
@@ -2415,14 +2322,11 @@ bool bookmarkLoad(const std::string& path) {
     fclose(f); return true;
 }
 
-// ========================================================================
-// Auto type detection
-// ========================================================================
 static float plausibilityInt(int64_t v, size_t bits) {
-    // Heuristic: small to moderate positive ints in normal game ranges are most plausible
-    if (v == 0) return 0.35f;                       // common but generic
+
+    if (v == 0) return 0.35f;
     int64_t magnitude = v < 0 ? -v : v;
-    // Pattern fill markers - very unlikely real data
+
     uint64_t u = (uint64_t)v;
     if (bits == 32 && (u == 0xCCCCCCCC || u == 0xCDCDCDCD || u == 0xFEEEFEEE || u == 0xBAADF00D)) return 0.05f;
     if (bits == 32 && u == 0xFFFFFFFF) return 0.15f;
@@ -2437,7 +2341,7 @@ static float plausibilityFloat(double v) {
     if (v == 0) return 0.40f;
     if (!std::isfinite(v)) return 0.02f;
     double a = v < 0 ? -v : v;
-    if (a >= 1e-30 && a < 1e-6)  return 0.15f; // tiny denormals - usually noise
+    if (a >= 1e-30 && a < 1e-6)  return 0.15f;
     if (a < 1e10 && a > 1e-6)    return 0.85f;
     return 0.20f;
 }
@@ -2458,7 +2362,7 @@ std::vector<TypeGuess> guessTypeAt(LPVOID addr) {
     if (r >= 8) {
         add(DT_INT64 , formatTypedValue(buf, DT_INT64 ), plausibilityInt(*(int64_t*)buf, 64), "64-bit signed");
         add(DT_DOUBLE, formatTypedValue(buf, DT_DOUBLE), plausibilityFloat(*(double*)buf), "IEEE-754 double");
-        // Pointer heuristic on 8 bytes
+
         uint64_t u = *(uint64_t*)buf;
         if (u >= 0x10000 && u < 0x7FFFFFFFFFFF) {
             MEMORY_BASIC_INFORMATION mbi;
@@ -2474,9 +2378,6 @@ std::vector<TypeGuess> guessTypeAt(LPVOID addr) {
     return out;
 }
 
-// ========================================================================
-// PE info viewer
-// ========================================================================
 PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
     PEInfo info{};
     info.moduleName = modName;
@@ -2485,7 +2386,6 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
     SIZE_T r = 0;
     if (!ReadProcessMemory(s_hProc, mod, &dos, sizeof(dos), &r) || dos.e_magic != IMAGE_DOS_SIGNATURE) return info;
 
-    // Read NT headers
     IMAGE_NT_HEADERS64 nt64{};
     if (!ReadProcessMemory(s_hProc, (LPCVOID)((BYTE*)mod + dos.e_lfanew), &nt64, sizeof(nt64), &r) || nt64.Signature != IMAGE_NT_SIGNATURE) return info;
     info.is64 = (nt64.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
@@ -2494,7 +2394,6 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
     info.timestamp = nt64.FileHeader.TimeDateStamp;
     info.checksum  = nt64.OptionalHeader.CheckSum;
 
-    // Sections
     LPVOID secStart = (LPVOID)((BYTE*)mod + dos.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + nt64.FileHeader.SizeOfOptionalHeader);
     for (int i = 0; i < nt64.FileHeader.NumberOfSections; i++) {
         IMAGE_SECTION_HEADER sh{};
@@ -2508,7 +2407,6 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
         info.sections.push_back(std::move(ps));
     }
 
-    // Imports
     DWORD impRva  = nt64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     if (impRva) {
         IMAGE_IMPORT_DESCRIPTOR idt{};
@@ -2518,7 +2416,7 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
             if (idt.Name == 0 && idt.FirstThunk == 0) break;
             char dllName[256] = {};
             ReadProcessMemory(s_hProc, (LPVOID)((BYTE*)mod + idt.Name), dllName, sizeof(dllName)-1, &r);
-            // Walk OriginalFirstThunk
+
             DWORD oft = idt.OriginalFirstThunk ? idt.OriginalFirstThunk : idt.FirstThunk;
             size_t k = 0;
             while (k < 4096) {
@@ -2529,7 +2427,7 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
                 ipt.dll = dllName;
                 ipt.iatPointer = (LPVOID)((BYTE*)mod + idt.FirstThunk + k * sizeof(ULONGLONG));
                 if (thunk & 0x8000000000000000ULL) {
-                    // Ordinal
+
                     char ord[32]; sprintf(ord, "#%llu", (unsigned long long)(thunk & 0xFFFF));
                     ipt.name = ord;
                 } else {
@@ -2547,18 +2445,14 @@ PEInfo getPEInfo(HMODULE mod, const std::string& modName) {
         }
     }
 
-    // Exports (reuse dumpExports)
     info.exports = enumerateAllExports();
-    // Filter to this module
+
     info.exports.erase(std::remove_if(info.exports.begin(), info.exports.end(),
         [&](const ExportRow& e){ return e.module != modName; }), info.exports.end());
 
     return info;
 }
 
-// ========================================================================
-// Process suspend / resume all
-// ========================================================================
 volatile bool g_processSuspended = false;
 
 size_t suspendAllThreads() {
@@ -2598,10 +2492,6 @@ size_t resumeAllThreads() {
     return n;
 }
 
-// ========================================================================
-// Stack walker (heuristic - reads qwords from RSP forward, treats those that
-// look like return addresses in module code regions as frame anchors)
-// ========================================================================
 std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
     std::vector<StackFrame> out;
     if (!s_hProc) return out;
@@ -2612,7 +2502,6 @@ std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
     if (!GetThreadContext(th, &ctx)) { ResumeThread(th); CloseHandle(th); return out; }
     ResumeThread(th); CloseHandle(th);
 
-    // Build module ranges for code-section identification
     struct ModR { uintptr_t base, end; std::string name; };
     std::vector<ModR> modR;
     HMODULE mods[1024]; DWORD cb = 0;
@@ -2629,7 +2518,6 @@ std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
         return false;
     };
 
-    // First frame from current RIP
     StackFrame f0;
     f0.rip = (uintptr_t)ctx.Rip;
     f0.rsp = (uintptr_t)ctx.Rsp;
@@ -2637,7 +2525,6 @@ std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
     f0.disasm = disasmOneAtRemote((LPVOID)f0.rip);
     out.push_back(f0);
 
-    // Heuristic walk: read 256 qwords from RSP up, keep ones that look like return addresses
     uintptr_t rsp = (uintptr_t)ctx.Rsp;
     BYTE buf[8 * 256];
     SIZE_T r = 0;
@@ -2652,7 +2539,7 @@ std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
                 f.rsp = rsp + i * 8;
                 f.moduleName = name;
                 f.moduleOffset = off;
-                f.disasm = disasmOneAtRemote((LPVOID)(cand - 5));   // disassemble likely call site
+                f.disasm = disasmOneAtRemote((LPVOID)(cand - 5));
                 out.push_back(f);
             }
         }
@@ -2660,9 +2547,6 @@ std::vector<StackFrame> walkStack(DWORD tid, size_t maxFrames) {
     return out;
 }
 
-// ========================================================================
-// Process tree + Network endpoints
-// ========================================================================
 std::vector<ProcessNode> listProcessesTree(const std::string& filter) {
     std::vector<ProcessNode> all;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -2685,7 +2569,6 @@ std::vector<ProcessNode> listProcessesTree(const std::string& filter) {
     }
     CloseHandle(snap);
 
-    // Build a quick child map: ppid -> indices
     std::map<DWORD, std::vector<size_t>> children;
     std::map<DWORD, size_t> byPid;
     for (size_t i = 0; i < all.size(); i++) byPid[all[i].pid] = i;
@@ -2693,14 +2576,13 @@ std::vector<ProcessNode> listProcessesTree(const std::string& filter) {
         if (all[i].ppid != all[i].pid && byPid.count(all[i].ppid))
             children[all[i].ppid].push_back(i);
     }
-    // Find roots (pids whose parent is missing OR self-parent)
+
     std::vector<size_t> roots;
     for (size_t i = 0; i < all.size(); i++)
         if (!byPid.count(all[i].ppid) || all[i].ppid == all[i].pid) roots.push_back(i);
-    // Sort roots by name
+
     std::sort(roots.begin(), roots.end(), [&](size_t a, size_t b){ return all[a].name < all[b].name; });
 
-    // DFS traversal, building depth
     std::vector<ProcessNode> ordered;
     std::function<void(size_t,int)> dfs = [&](size_t i, int d) {
         ProcessNode n = all[i]; n.depth = d;
@@ -2713,18 +2595,17 @@ std::vector<ProcessNode> listProcessesTree(const std::string& filter) {
     };
     for (size_t r : roots) dfs(r, 0);
 
-    // Apply substring filter (case-insensitive) - but keep ancestor context for visible matches
     if (!filter.empty()) {
         std::string fl = filter;
         for (auto& c : fl) c = (char)std::tolower((unsigned char)c);
-        // Build set of visible indices in `ordered`
+
         std::vector<bool> keep(ordered.size(), false);
         for (size_t i = 0; i < ordered.size(); i++) {
             std::string lo = ordered[i].name;
             for (auto& c : lo) c = (char)std::tolower((unsigned char)c);
             if (lo.find(fl) != std::string::npos) {
                 keep[i] = true;
-                // Mark all parents (lower depth, immediately preceding) up to depth 0
+
                 int d = ordered[i].depth;
                 for (int j = (int)i - 1; j >= 0 && d > 0; j--) {
                     if (ordered[j].depth < d) { keep[j] = true; d = ordered[j].depth; }
@@ -2830,34 +2711,6 @@ VerifyDiff verifyDiffNow() {
     return d;
 }
 
-// ========================================================================
-// Session save / load
-//
-// Binary format (little-endian on x86-64):
-//   magic "MSC1" (4)
-//   u32   version (=1)
-//   u32   attached_pid
-//   --- ScanParams ---
-//   u32   dt, sc
-//   u32   writableOnly, skipImage, executableOnly, workingSetOnly, copyOnWriteOnly
-//   u64   addrMin, addrMax
-//   u32   alignment, skipZero
-//   u32   hasMin, hasMax
-//   i64   rmin, rmax
-//   f64   rminF, rmaxF
-//   u32   maxResults
-//   str   value, modFilter, skipAddrSuffixHex
-//   --- Scan results ---
-//   u32   nResults
-//   for each: u64 addr, u32 prevValLen, bytes prevVal
-//   --- Snapshot ---
-//   u32   snapshotDt, nSnapshot
-//   for each: u32 len, bytes data
-//   --- Live monitor ---
-//   u32   liveMonDt, nLive
-//   for each: LiveStat (POD blob - 8+8+16+16+16+16+1+1+1+1+4+4+16*8+16*4+1+1+4 = ~250 bytes; we write a fixed struct dump)
-// ========================================================================
-
 static void wU32(FILE* f, uint32_t v) { fwrite(&v, 4, 1, f); }
 static void wU64(FILE* f, uint64_t v) { fwrite(&v, 8, 1, f); }
 static void wI64(FILE* f, int64_t v)  { fwrite(&v, 8, 1, f); }
@@ -2870,7 +2723,7 @@ static bool rF64(FILE* f, double& v)   { return fread(&v, 8, 1, f) == 1; }
 static bool rStr(FILE* f, std::string& s) {
     uint32_t n = 0;
     if (fread(&n, 4, 1, f) != 1) return false;
-    if (n > (1u << 24)) return false;     // 16 MB cap per string
+    if (n > (1u << 24)) return false;
     s.assign(n, 0);
     if (n) { if (fread(&s[0], 1, n, f) != n) return false; }
     return true;
@@ -2880,9 +2733,9 @@ bool saveSession(const std::string& path) {
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
     fwrite("MSC1", 1, 4, f);
-    wU32(f, 1);                                // version
-    wU32(f, s_pid);                            // last attached PID
-    // ScanParams
+    wU32(f, 1);
+    wU32(f, s_pid);
+
     const ScanParams& p = g_lastScanParams;
     wU32(f, (uint32_t)p.dt);
     wU32(f, (uint32_t)p.sc);
@@ -2905,7 +2758,7 @@ bool saveSession(const std::string& path) {
     wStr(f, p.value);
     wStr(f, p.modFilter);
     wStr(f, p.skipAddrSuffixHex);
-    // Results
+
     wU32(f, (uint32_t)g_scan.results.size());
     for (size_t i = 0; i < g_scan.results.size(); i++) {
         wU64(f, (uint64_t)(uintptr_t)g_scan.results[i]);
@@ -2913,18 +2766,18 @@ bool saveSession(const std::string& path) {
         wU32(f, (uint32_t)pv.size());
         if (!pv.empty()) fwrite(pv.data(), 1, pv.size(), f);
     }
-    // Snapshot
+
     wU32(f, (uint32_t)g_snapshotDt);
     wU32(f, (uint32_t)g_snapshot.size());
     for (const auto& s : g_snapshot) {
         wU32(f, (uint32_t)s.size());
         if (!s.empty()) fwrite(s.data(), 1, s.size(), f);
     }
-    // Live monitor
+
     wU32(f, (uint32_t)g_liveMonDt);
     wU32(f, (uint32_t)g_liveStats.size());
     for (const auto& s : g_liveStats) {
-        fwrite(&s, sizeof(LiveStat), 1, f);   // POD blob
+        fwrite(&s, sizeof(LiveStat), 1, f);
     }
     fclose(f);
     return true;
@@ -2937,7 +2790,7 @@ bool loadSession(const std::string& path) {
     if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "MSC1", 4) != 0) { fclose(f); return false; }
     uint32_t version = 0; if (!rU32(f, version) || version != 1) { fclose(f); return false; }
     uint32_t pid = 0; rU32(f, pid);
-    // ScanParams
+
     ScanParams p;
     uint32_t u;
     rU32(f, u); p.dt = (DataType)u;
@@ -2963,7 +2816,7 @@ bool loadSession(const std::string& path) {
     rStr(f, p.modFilter);
     rStr(f, p.skipAddrSuffixHex);
     g_lastScanParams = p;
-    // Results
+
     uint32_t nRes = 0;
     if (!rU32(f, nRes)) { fclose(f); return false; }
     if (nRes > 2000000) { fclose(f); return false; }
@@ -2979,7 +2832,7 @@ bool loadSession(const std::string& path) {
         g_scan.results.push_back((LPVOID)(uintptr_t)a);
         g_scan.prevVals.push_back(std::move(pv));
     }
-    // Snapshot
+
     rU32(f, u); g_snapshotDt = (int)u;
     uint32_t nSnap = 0;
     if (!rU32(f, nSnap)) { fclose(f); return false; }
@@ -2993,7 +2846,7 @@ bool loadSession(const std::string& path) {
         if (len) { if (fread(v.data(), 1, len, f) != len) { fclose(f); return false; } }
         g_snapshot.push_back(std::move(v));
     }
-    // Live monitor
+
     rU32(f, u); g_liveMonDt = (int)u;
     uint32_t nLive = 0;
     if (!rU32(f, nLive)) { fclose(f); return false; }
@@ -3005,13 +2858,12 @@ bool loadSession(const std::string& path) {
     }
     fclose(f);
 
-    // Try to re-attach to the saved PID if still alive
     if (pid && !s_hProc) {
         if (!attach(pid)) {
-            // PID not alive anymore; leave detached but keep results
+
         }
     }
     return true;
 }
 
-} 
+}

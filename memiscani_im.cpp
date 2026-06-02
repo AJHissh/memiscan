@@ -15,6 +15,9 @@
 
 #include "memcore.h"
 #include "mem_lua.h"
+#include "mem_ipc.h"
+
+static const unsigned short kMcpPort = 8377;
 
 static ID3D11Device*           g_pd3dDevice = NULL;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = NULL;
@@ -49,9 +52,9 @@ struct ScannerCfg {
     char  maxDBuf[16]  = "100";
     char  rowFilter[64] = "";
     bool  fullscreen = false;
-    bool  showAsText = false;    
-    int   strEncIdx = 2;        
-    bool  strCaseInsensitive = false;  
+    bool  showAsText = false;
+    int   strEncIdx = 2;
+    bool  strCaseInsensitive = false;
 };
 
 struct ModulesUI {
@@ -84,7 +87,7 @@ struct CheatsUI {
     int   selected = -1;
     char  nameBuf[128] = "";
     char  hotkeyBuf[16] = "";
-    std::string scriptEdit;     
+    std::string scriptEdit;
 };
 
 struct DisasmUI {
@@ -94,7 +97,7 @@ struct DisasmUI {
 };
 
 struct CodeInjUI {
-    char    scBuf[1024]  = "";      
+    char    scBuf[1024]  = "";
     char    caveMin[16]  = "32";
     std::vector<mem::CodeCave> caves;
     std::vector<mem::RemoteThreadEntry> threads;
@@ -104,7 +107,7 @@ struct WindowsUI {
     int  selected = -1;
     char filter[64] = "";
     char setText[256] = "";
-    char msgId[16] = "0x111";    // WM_COMMAND
+    char msgId[16] = "0x111";
     char wpBuf[16] = "0";
     char lpBuf[16] = "0";
 };
@@ -140,7 +143,7 @@ struct VerifyUI {
 };
 
 struct AsmUI {
-    std::string src;       // asm source text
+    std::string src;
     std::vector<BYTE> bytes;
     std::string err;
 };
@@ -176,7 +179,7 @@ struct HexUI {
     char sizeBuf[16] = "256";
     std::vector<BYTE> data;
     uintptr_t base = 0;
-    int  editIdx = -1;     // selected cell index for edit
+    int  editIdx = -1;
     char editVal[8] = "";
 };
 struct BookmarksUI {
@@ -190,7 +193,7 @@ struct PEUI {
     int                selectedModule = -1;
     mem::PEInfo        info;
     char               filter[64] = "";
-    int                viewMode = 0;   // 0=sections 1=imports 2=exports
+    int                viewMode = 0;
 };
 struct StackUI {
     char tidBuf[16] = "0";
@@ -213,7 +216,7 @@ struct NetUI {
 };
 
 struct LuaUI {
-    std::string source;          // editable source
+    std::string source;
     char       savePath[MAX_PATH] = "script.lua";
     int        logScrollTo = -1;
 };
@@ -227,6 +230,7 @@ struct AppState {
     LPVOID         selAddr = nullptr;
     char           newValueBuf[64] = "";
     bool           bypassReadOnly = false;
+    bool           forceScannerTab = false;
 
     bool           showHistory = false;
     LPVOID         historyAddr = nullptr;
@@ -274,9 +278,6 @@ struct AppState {
 };
 static AppState gApp;
 
-// ============================================================================
-// Theme + small helpers
-// ============================================================================
 namespace clr {
     constexpr ImVec4 bg        = ImVec4(0.055f, 0.062f, 0.084f, 1.00f);
     constexpr ImVec4 panel     = ImVec4(0.085f, 0.094f, 0.130f, 1.00f);
@@ -357,9 +358,6 @@ static bool ColorButton(const char* label, ImVec4 a, const ImVec2& sz = ImVec2(0
     return r;
 }
 
-// ============================================================================
-// Top bar + status bar + selected strip
-// ============================================================================
 static void DrawTopBar() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, clr::panel);
     ImGui::BeginChild("##topbar", ImVec2(0, 64), true);
@@ -480,6 +478,17 @@ static void StatusBar() {
     ImGui::TextDisabled("  |  results %zu", mem::g_scan.results.size());
     if (mem::g_liveMonActive) { ImGui::SameLine(); ImGui::TextColored(clr::ok, "  |  LIVE %zu", mem::g_liveStats.size()); }
     if (!mem::g_snapshot.empty()) { ImGui::SameLine(); ImGui::TextColored(clr::accentH, "  |  snapshot %zu", mem::g_snapshot.size()); }
+    if (memipc::running()) {
+        ImGui::SameLine();
+        ImGui::TextColored(clr::ok, "  |  MCP :%u (%d conn, %llu req)",
+                           (unsigned)memipc::port(), memipc::connectionCount(),
+                           (unsigned long long)memipc::requestCount());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("MCP/IPC command server: 127.0.0.1 (loopback only), token-authenticated.\nToken file: %s\nDrive this session from Claude via the memiscani MCP bridge.",
+                              memipc::tokenPath().c_str());
+    } else {
+        ImGui::SameLine(); ImGui::TextColored(clr::warn, "  |  MCP off");
+    }
     ImGui::SameLine(0, 18);
     ImGui::TextColored(col, "%s", gApp.statusLine.c_str());
     ImGui::EndChild();
@@ -561,9 +570,6 @@ static void DrawSelectedStrip() {
     ImGui::PopStyleColor();
 }
 
-// ============================================================================
-// Scanner tab
-// ============================================================================
 static void DoScanAsync(bool first) {
     using namespace mem;
     ScanParams p;
@@ -593,9 +599,6 @@ static void DoScanAsync(bool first) {
     });
 }
 
-// Render a byte buffer as a printable ASCII string for the "As Text" result view.
-// Stops at the first NUL (treats the value as a C string); non-printable bytes
-// become '.' so the column stays single-line and readable.
 static std::string resultBytesAsText(const BYTE* b, size_t n) {
     std::string s;
     for (size_t i = 0; i < n; i++) {
@@ -632,7 +635,6 @@ static void DrawResultsTable(bool fullscreen) {
         size_t sz = dtSize(dt);
         LPVOID base = mem::baseAddress();
 
-        // Build visible index list once (filter)
         static std::vector<size_t> visibleIdx;
         visibleIdx.clear();
         visibleIdx.reserve(cap);
@@ -645,14 +647,12 @@ static void DrawResultsTable(bool fullscreen) {
             for (size_t i = 0; i < cap; i++) visibleIdx.push_back(i);
         }
 
-        // String / AOB results occupy a variable number of bytes (the matched
-        // pattern length, recorded per result in g_scan.prevVals).
         bool patType = (dt == DT_STRING || dt == DT_AOB);
-        bool asText = gApp.sc.showAsText && !patType;   // toggle only affects numeric types
+        bool asText = gApp.sc.showAsText && !patType;
         ImGuiListClipper clipper;
         clipper.Begin((int)visibleIdx.size());
         BYTE cur[16];
-        BYTE wide[256];     // holds string/AOB bytes or the "As Text" peek window
+        BYTE wide[256];
         while (clipper.Step()) {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
                 size_t i = visibleIdx[row];
@@ -661,7 +661,6 @@ static void DrawResultsTable(bool fullscreen) {
                 SIZE_T r = 0;
                 bool ok = isAttached() && ReadProcessMemory(processHandle(), a, cur, sz, &r) && r >= sz;
 
-                // How many bytes to read for the wide (string/AOB/text) view.
                 size_t wantW = 0;
                 if (patType) {
                     wantW = (i < g_scan.prevVals.size() && !g_scan.prevVals[i].empty())
@@ -788,7 +787,6 @@ static void DrawScannerTab() {
     ImGui::SameLine(); ImGui::SetNextItemWidth(100); ImGui::InputTextWithHint("##rmax", "val max", gApp.sc.rangeMax, sizeof(gApp.sc.rangeMax));
     ImGui::SameLine(); ImGui::TextDisabled("Initial-value range (numeric only)");
 
-    // Fast scan filters
     const char* alignItems[] = { "Auto", "1 byte", "2 byte", "4 byte", "8 byte" };
     ImGui::SetNextItemWidth(110);
     ImGui::Combo("Align##fal", &gApp.sc.alignmentIdx, alignItems, IM_ARRAYSIZE(alignItems));
@@ -893,9 +891,6 @@ static void DrawScannerTab() {
     DrawResultsTable(false);
 }
 
-// ============================================================================
-// History modal
-// ============================================================================
 static void DrawHistoryModal() {
     using namespace mem;
     if (!gApp.showHistory) return;
@@ -936,9 +931,6 @@ static void DrawHistoryModal() {
     }
 }
 
-// ============================================================================
-// Modules tab
-// ============================================================================
 static void DrawModulesTab() {
     SectionLabel("Loaded modules");
     HintText("Click Refresh to enumerate loaded modules.  Use the filter to narrow.  Select a row + Inject / Eject below.");
@@ -1002,9 +994,6 @@ static void DrawModulesTab() {
     ImGui::EndDisabled();
 }
 
-// ============================================================================
-// Patcher tab
-// ============================================================================
 static std::vector<BYTE> parseHexBytes(const char* s) {
     std::vector<BYTE> out;
     while (*s) {
@@ -1214,9 +1203,6 @@ static void DrawPatcherTab() {
     }
 }
 
-// ============================================================================
-// Pointers tab
-// ============================================================================
 static std::vector<intptr_t> parseOffsetList(const char* s) {
     std::vector<intptr_t> out;
     while (*s) {
@@ -1290,9 +1276,6 @@ static void DrawPointersTab() {
     }
 }
 
-// ============================================================================
-// Cheats tab
-// ============================================================================
 static void LoadSelectedCheatIntoEditor() {
     if (gApp.cheats.selected < 0 || gApp.cheats.selected >= (int)mem::g_cheats.size()) {
         gApp.cheats.nameBuf[0] = 0; gApp.cheats.hotkeyBuf[0] = 0; gApp.cheats.scriptEdit.clear();
@@ -1383,7 +1366,7 @@ static void DrawCheatsTab() {
         gApp.cheats.scriptEdit.resize(std::max<size_t>(gApp.cheats.scriptEdit.size(), 4096));
         ImGui::InputTextMultiline("##script", gApp.cheats.scriptEdit.data(), gApp.cheats.scriptEdit.size(),
                                   ImVec2(-1, 380), ImGuiInputTextFlags_AllowTabInput);
-        // resize to actual length
+
         gApp.cheats.scriptEdit.resize(strlen(gApp.cheats.scriptEdit.c_str()));
 
         if (ColorButton("Apply edits", clr::accent, ImVec2(110, 0))) { ApplyCheatEditor(); gApp.setStatus("Edits applied.", "ok"); }
@@ -1413,9 +1396,6 @@ static void DrawCheatsTab() {
     ImGui::Columns(1);
 }
 
-// ============================================================================
-// Disasm tab (Zydis walker)
-// ============================================================================
 static void DrawDisasmTab() {
     SectionLabel("Disasm walker (Zydis x86-64)");
     HintText("Disassemble N bytes at any address.  Use 'From selected' to import the Scanner-selected address.");
@@ -1455,9 +1435,6 @@ static void DrawDisasmTab() {
     }
 }
 
-// ============================================================================
-// Code Inj tab
-// ============================================================================
 static void DrawCodeInjTab() {
     SectionLabel("Inject shellcode");
     HintText("Paste hex bytes (e.g. 90 90 C3 or 90,90,C3 or 0x90 0x90 0xC3).  Inject allocates RWX in target, writes the bytes, optionally starts a new thread at the entry.");
@@ -1540,9 +1517,6 @@ static void DrawCodeInjTab() {
     DrawStackSection();
 }
 
-// ============================================================================
-// Windows tab
-// ============================================================================
 static void DrawWindowsTab() {
     SectionLabel("Target windows");
     HintText("Enumerate top-level HWNDs of the attached process.  Click a row to select.  Then send text or messages, or control window state.");
@@ -1608,9 +1582,6 @@ static void DrawWindowsTab() {
     ImGui::EndDisabled();
 }
 
-// ============================================================================
-// Detect Inj tab
-// ============================================================================
 static void DrawDetectTab() {
     SectionLabel("Injection detection");
     HintText("Defensive scan for suspicious memory regions and thread anomalies.  Enable the checks you want, then Run.");
@@ -1655,9 +1626,6 @@ static void DrawDetectTab() {
     }
 }
 
-// ============================================================================
-// Shellcode tab
-// ============================================================================
 static void DrawShellcodeTab() {
     SectionLabel("Shellcode loader");
     HintText("Load a shellcode .bin file, optionally auto-execute via CreateRemoteThread after upload.");
@@ -1698,15 +1666,12 @@ static void DrawShellcodeTab() {
         for (size_t i = 0; i < cap; i++) { sprintf(tmp, "%02X ", gApp.shel.bytes[i]); hex += tmp; if ((i & 15) == 15) hex += "\n"; }
         ImGui::TextWrapped("%s", hex.c_str());
         SectionLabel("Disasm (first 256 bytes)");
-        auto lines = mem::disasmRangeAtRemote(NULL, 0, 0); // dummy - we don't have a remote addr yet; show note
+        auto lines = mem::disasmRangeAtRemote(NULL, 0, 0);
         (void)lines;
         ImGui::TextDisabled("(disasm preview shown after the shellcode is injected - re-open Disasm tab and 'From selected' on the injected address)");
     }
 }
 
-// ============================================================================
-// Verify tab
-// ============================================================================
 static void DrawVerifyTab() {
     SectionLabel("Verification snapshot");
     HintText("Take a snapshot of currently loaded modules + threads.  Then run 'Diff' later to see what's been added or removed.");
@@ -1741,9 +1706,6 @@ static void DrawVerifyTab() {
     ImGui::Columns(1);
 }
 
-// ============================================================================
-// Trigger tab
-// ============================================================================
 static void DrawTriggerTab() {
     SectionLabel("Trigger remote execution");
     HintText("Run code already present in the target process.  CreateRemoteThread starts a new thread at the address.  QueueUserAPC piggybacks on an existing alertable thread by TID.");
@@ -1773,9 +1735,6 @@ static void DrawTriggerTab() {
     ImGui::EndDisabled();
 }
 
-// ============================================================================
-// Exports tab
-// ============================================================================
 static void DrawExportsTab() {
     SectionLabel("Module exports");
     HintText("Parses the PE export directory of every loaded module of the attached process.  Click a row to send the address to the Scanner selected slot.");
@@ -1818,9 +1777,6 @@ static void DrawExportsTab() {
     }
 }
 
-// ============================================================================
-// Auto Ptr tab
-// ============================================================================
 static void DrawAutoPtrTab() {
     SectionLabel("Auto pointer scanner");
     HintText("Snapshot all readable memory, then walk backwards N levels to find pointer chains rooted in static module memory that resolve to the target.  Depth 3 + maxOff 0x800 is a good default for game cheats.");
@@ -1867,9 +1823,6 @@ static void DrawAutoPtrTab() {
     }
 }
 
-// ============================================================================
-// Lua tab
-// ============================================================================
 static const char* kLuaStarter =
     "-- Memiscani Lua scripting.\n"
     "-- Globals exposed: mem.*, log(), print(), prot.PAGE_*\n"
@@ -2017,7 +1970,6 @@ static void DrawLuaTab() {
 
     if (gApp.lua.source.empty()) gApp.lua.source = kLuaStarter;
 
-    // Toolbar
     bool busy = memlua::isRunning();
     ImGui::BeginDisabled(busy);
     if (ColorButton("Run", clr::ok, ImVec2(80, 0))) {
@@ -2064,13 +2016,12 @@ static void DrawLuaTab() {
     if (busy) ImGui::TextColored(clr::ok, "  RUNNING");
     else      ImGui::TextDisabled("  idle");
 
-    // Insert-example row
     ImGui::Separator();
     ImGui::TextColored(clr::accent, "Insert example:");
     ImGui::SameLine();
     for (const auto& ex : kLuaExamples) {
         if (ImGui::SmallButton(ex.label)) {
-            // Append (or replace if editor only contains starter)
+
             if (gApp.lua.source == kLuaStarter || gApp.lua.source.empty()) {
                 gApp.lua.source = std::string("-- ") + ex.label + "\n" + ex.code;
             } else {
@@ -2084,17 +2035,14 @@ static void DrawLuaTab() {
     }
     ImGui::NewLine();
 
-    // How-to and cheatsheet (collapsible)
     if (ImGui::CollapsingHeader("How to use this tab + Lua API cheatsheet", ImGuiTreeNodeFlags_None)) {
         ImGui::TextUnformatted(kLuaPromptMd);
     }
 
-    // Layout: editor + output side by side
     ImVec2 region = ImGui::GetContentRegionAvail();
     float editorW = region.x * 0.55f;
     if (editorW < 380) editorW = 380;
 
-    // Editor
     ImGui::BeginChild("##luaedit", ImVec2(editorW, -2), true);
     ImGui::TextColored(clr::accent, "script");
     if (gApp.lua.source.capacity() < gApp.lua.source.size() + 64) gApp.lua.source.reserve(gApp.lua.source.size() + 64);
@@ -2109,7 +2057,6 @@ static void DrawLuaTab() {
 
     ImGui::SameLine();
 
-    // Output
     ImGui::BeginChild("##luaout", ImVec2(0, -2), true);
     ImGui::TextColored(clr::accent, "output");
     ImGui::Separator();
@@ -2126,9 +2073,6 @@ static void DrawLuaTab() {
     ImGui::EndChild();
 }
 
-// ============================================================================
-// Network tab
-// ============================================================================
 static void DrawNetworkTab() {
     SectionLabel("Network endpoints");
     HintText("TCP/UDP sockets owned by processes on this machine (via GetExtendedTcp/UdpTable).  Filter to the attached process for game-network analysis, or look across the whole system for what's listening.");
@@ -2183,9 +2127,6 @@ static void DrawNetworkTab() {
     }
 }
 
-// ============================================================================
-// Hex Viewer tab
-// ============================================================================
 static const char* kDtItemsX[] = { "int8","int16","int32","int64","float","double","String","AOB" };
 
 static void DrawHexTab() {
@@ -2212,7 +2153,6 @@ static void DrawHexTab() {
 
     if (gApp.hex.data.empty()) { ImGui::TextDisabled("(no data - click Read)"); return; }
 
-    // Hex + ASCII grid - 16 bytes per row
     ImGui::BeginChild("##hexscroll", ImVec2(0, 0), true);
     char hdr[80]; sprintf(hdr, "       offset    +0 +1 +2 +3 +4 +5 +6 +7 +8 +9 +A +B +C +D +E +F   ascii");
     ImGui::TextDisabled("%s", hdr);
@@ -2222,7 +2162,7 @@ static void DrawHexTab() {
         ImGui::Text("0x%016llX  ", (unsigned long long)a);
         ImGui::PopStyleColor();
         ImGui::SameLine();
-        // hex cells
+
         std::string asciiPart;
         for (size_t col = 0; col < 16; col++) {
             size_t i = row + col;
@@ -2268,9 +2208,6 @@ static void DrawHexTab() {
     }
 }
 
-// ============================================================================
-// Bookmarks tab
-// ============================================================================
 static void DrawBookmarksTab() {
     SectionLabel("Bookmarks");
     HintText("Save named addresses with optional notes.  Persists across sessions via memiscani_bookmarks.txt.  Click a row to send the address to the Scanner-selected slot.");
@@ -2326,9 +2263,6 @@ static void DrawBookmarksTab() {
     }
 }
 
-// ============================================================================
-// PE Info tab
-// ============================================================================
 static void DrawPETab() {
     SectionLabel("PE info");
     HintText("Parse the PE header of any loaded module - sections, imports, exports - directly from target memory.");
@@ -2422,9 +2356,6 @@ static void DrawPETab() {
     }
 }
 
-// ============================================================================
-// Auto-type modal
-// ============================================================================
 static void DrawAutoTypeModal() {
     if (!gApp.at.showModal) return;
     ImGui::OpenPopup("Auto-detect data type");
@@ -2460,9 +2391,6 @@ static void DrawAutoTypeModal() {
     }
 }
 
-// ============================================================================
-// Stack walker (appended to Code Inj tab via its own section)
-// ============================================================================
 static void DrawStackSection() {
     SectionLabel("Stack walker (selected thread)");
     HintText("Suspends a thread, reads RSP-area qwords, and shows those that look like return addresses inside a module's code.  Heuristic walker - good enough to see who called what.");
@@ -2498,9 +2426,6 @@ static void DrawStackSection() {
     }
 }
 
-// ============================================================================
-// Watch tab
-// ============================================================================
 static void DrawWatchTab() {
     SectionLabel("Live watch list");
     HintText("Add addresses by hand and watch their values update.  Independent of the scanner.  Save / Load persists to memiscani_watch.txt.");
@@ -2567,9 +2492,6 @@ static void DrawWatchTab() {
     }
 }
 
-// ============================================================================
-// Hardware-breakpoint trace tab
-// ============================================================================
 static void DrawHwbpTab() {
     SectionLabel("Hardware breakpoint  (find what reads / writes)");
     HintText("Sets DR0 on every thread of the target via DebugActiveProcess + SetThreadContext.  When the watched address is read / written, the offending RIP and disassembly are logged below.  Disable when done.");
@@ -2644,10 +2566,6 @@ static void DrawHwbpTab() {
     }
 }
 
-// ============================================================================
-// Workflow guide modal
-// ============================================================================
-
 struct WF {
     const char* title;
     const char* purpose;
@@ -2691,7 +2609,6 @@ static void DrawWorkflow(const WF& w) {
 }
 
 static void DrawCategory(const char* name, std::vector<WF> wfs, bool defaultOpen = false) {
-    // Hide whole category if nothing matches the filter
     bool anyMatch = false;
     for (auto& w : wfs) if (wfMatchesFilter(w)) { anyMatch = true; break; }
     if (!anyMatch && gApp.guideFilter[0]) return;
@@ -2726,7 +2643,6 @@ static void DrawGuideModal() {
 
         ImGui::BeginChild("##gscroll", ImVec2(0, -2), false);
 
-        // ============================================================
         DrawCategory("A.  Finding values in memory", {
             {
                 "1.  HP / health  (small bounded int, typical 0-1000)",
@@ -2829,9 +2745,8 @@ static void DrawGuideModal() {
                     "Once confirmed: Patcher tab and generate a signature from THIS address with the AOB generator - now your patch will resolve correctly across game updates."
                 }
             },
-        }, /*defaultOpen=*/true);
+        }, true);
 
-        // ============================================================
         DrawCategory("B.  Tracking values over time", {
             {
                 "9.  Snapshot + Diff workflow  (event-driven refinement)",
@@ -2883,7 +2798,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("C.  Stable / pointer-resolved addresses", {
             {
                 "13.  Manual pointer chain",
@@ -2917,7 +2831,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("D.  Patching code / values", {
             {
                 "16.  NOP an instruction  (disable a code path)",
@@ -2984,7 +2897,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("E.  Find what reads / writes  (Hardware Breakpoints)", {
             {
                 "22.  Find what WRITES an address  (find the function that modifies HP)",
@@ -3027,7 +2939,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("F.  Code injection & remote execution", {
             {
                 "26.  Inject a DLL",
@@ -3066,7 +2977,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("G.  Inspection / analysis", {
             {
                 "30.  Disassemble around an address",
@@ -3130,7 +3040,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("H.  Window / process control", {
             {
                 "37.  Send keystrokes / messages to target HWND",
@@ -3144,7 +3053,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("I.  End-to-end combined workflows", {
             {
                 "38.  Infinite HP with cross-restart stability",
@@ -3222,7 +3130,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("J.  Lua scripting", {
             {
                 "45.  Read / write values with a Lua one-liner",
@@ -3344,7 +3251,6 @@ static void DrawGuideModal() {
             },
         });
 
-        // ============================================================
         DrawCategory("K.  Session save / load + scan filters", {
             {
                 "55.  Save and restore your scan session across restarts",
@@ -3428,9 +3334,6 @@ static void DrawGuideModal() {
     ImGui::PopStyleColor();
 }
 
-// ============================================================================
-// Placeholders for the remaining tabs (MVP-level info)
-// ============================================================================
 static void DrawComingSoon(const char* name, const char* what) {
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, clr::sectHdr);
@@ -3442,13 +3345,6 @@ static void DrawComingSoon(const char* name, const char* what) {
     ImGui::TextDisabled("Use legacy memiscani.exe for this tab in the meantime - all logic exists there and will be ported to memcore/ImGui in the next pass.");
 }
 
-// ============================================================================
-// History modal already declared earlier
-// ============================================================================
-
-// ============================================================================
-// Low-level keyboard hook for cheat hotkeys F1-F5
-// ============================================================================
 static LRESULT CALLBACK LowLevelKbProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
         KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lParam;
@@ -3466,9 +3362,6 @@ static LRESULT CALLBACK LowLevelKbProc(int nCode, WPARAM wParam, LPARAM lParam) 
     return CallNextHookEx(gApp.kbHook, nCode, wParam, lParam);
 }
 
-// ============================================================================
-// Main UI
-// ============================================================================
 static void DrawMainUI() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -3488,7 +3381,9 @@ static void DrawMainUI() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, clr::panel);
     ImGui::BeginChild("##tabsHost", ImVec2(0, -2), true);
     if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_Reorderable|ImGuiTabBarFlags_FittingPolicyResizeDown)) {
-        if (ImGui::BeginTabItem("Scanner"))    { DrawScannerTab(); ImGui::EndTabItem(); }
+        ImGuiTabItemFlags scTabFlags = gApp.forceScannerTab ? ImGuiTabItemFlags_SetSelected : 0;
+        gApp.forceScannerTab = false;
+        if (ImGui::BeginTabItem("Scanner", nullptr, scTabFlags)) { DrawScannerTab(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Watch"))      { DrawWatchTab();   ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Bookmarks"))  { DrawBookmarksTab(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Hex View"))   { DrawHexTab();     ImGui::EndTabItem(); }
@@ -3528,9 +3423,6 @@ static void PumpLiveMonitor() {
     if (now - gApp.lastLiveTick >= 50) { mem::liveMonTick(); gApp.lastLiveTick = now; }
 }
 
-// ============================================================================
-// WinMain + DX11 glue
-// ============================================================================
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInstance, NULL, NULL, NULL, NULL, L"MemiscaniIm", NULL };
     RegisterClassExW(&wc);
@@ -3557,11 +3449,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     gApp.kbHook = SetWindowsHookExA(WH_KEYBOARD_LL, LowLevelKbProc, GetModuleHandleA(NULL), 0);
 
-    // Auto-load any prior session next to the exe
     if (mem::loadSession("memiscani_session.dat")) {
         gApp.setStatus("Previous session restored.", "ok");
     }
-    // Also load lua source if a sidecar file exists
     {
         FILE* fl = nullptr;
         if (fopen_s(&fl, "memiscani_lua_state.lua", "rb") == 0 && fl) {
@@ -3569,6 +3459,36 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             if (sz > 0 && sz < 10*1024*1024) { gApp.lua.source.resize(sz); fread(&gApp.lua.source[0], 1, sz, fl); }
             fclose(fl);
         }
+    }
+
+    {
+        std::string ipcErr;
+        if (memipc::start(kMcpPort, ipcErr)) {
+            char b[96]; sprintf(b, "MCP server listening on 127.0.0.1:%u", (unsigned)kMcpPort);
+            gApp.setStatus(b, "ok");
+        } else {
+            gApp.setStatus(("MCP server off: " + ipcErr).c_str(), "warn");
+        }
+    }
+    {
+        memipc::GuiHooks h;
+        h.syncScan = [](const mem::ScanParams& p) {
+            gApp.sc.dtIdx = (int)p.dt;
+            gApp.sc.scIdx = (int)p.sc;
+            strncpy(gApp.sc.valueBuf, p.value.c_str(), sizeof(gApp.sc.valueBuf) - 1);
+            gApp.sc.valueBuf[sizeof(gApp.sc.valueBuf) - 1] = 0;
+            gApp.sc.strEncIdx = p.strEnc;
+            gApp.sc.strCaseInsensitive = p.strCaseInsensitive;
+            gApp.sc.writableOnly   = p.writableOnly;
+            gApp.sc.skipImage      = p.skipImage;
+            gApp.sc.executableOnly = p.executableOnly;
+            gApp.sc.workingSetOnly = p.workingSetOnly;
+            gApp.sc.skipZero       = p.skipZero;
+            gApp.forceScannerTab = true;
+        };
+        h.selectAddr = [](unsigned long long a) { gApp.selAddr = (LPVOID)(uintptr_t)a; };
+        h.status     = [](const std::string& m) { gApp.setStatus(m.c_str(), "info"); };
+        memipc::setGuiHooks(h);
     }
 
     bool done = false;
@@ -3580,6 +3500,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             if (msg.message == WM_QUIT) done = true;
         }
         if (done) break;
+
+        memipc::poll();
 
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
             CleanupRenderTarget();
@@ -3603,11 +3525,11 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     if (gApp.kbHook) UnhookWindowsHookEx(gApp.kbHook);
+    memipc::stop();
     if (gApp.scanThread.joinable()) gApp.scanThread.join();
     memlua::shutdown();
     mem::liveMonStop();
 
-    // Auto-save session (results + snapshot + live + params) and Lua source.
     mem::saveSession("memiscani_session.dat");
     {
         FILE* fl = nullptr;
