@@ -1,6 +1,6 @@
-# Proc Mem Analysis tool - Memiscani — Full install
+# Proc Mem Analysis tool - Memiscani MCP — Full install
 
-## Features - Memory analysis and modification tools with workflow support
+## Features - Memory Analysis + Workflow Guides + MCP Connection
 
 <img width="1900" height="1000" alt="memiscani1" src="https://github.com/user-attachments/assets/44d3963a-6abb-426e-aca4-9bb4b851ab97" />
 
