@@ -127,7 +127,7 @@ automatically. When it is listening, the status bar shows **`MCP :8377`**.
 | Lua scripting | `run_lua`, `lua_status`, `lua_stop`, `lua_log` |
 
 
-### Quick test (without an MCP client)
+### Quick test 
 
 PowerShell, with the memiscani GUI running:
 
