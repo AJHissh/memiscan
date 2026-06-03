@@ -2,10 +2,6 @@
 
 ## Features - Memory Analysis + Workflow Guides + MCP Connection
 
-<img width="1900" height="1000" alt="memiscani1" src="https://github.com/user-attachments/assets/44d3963a-6abb-426e-aca4-9bb4b851ab97" />
-
-<img width="1900" height="1000" alt="memiscani2" src="https://github.com/user-attachments/assets/cdff40e4-829a-40cf-ba01-4b5daeb5a192" />
-
 
 ## 1. Install MinGW-w64 (the C/C++ compiler)
 
