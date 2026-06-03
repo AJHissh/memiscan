@@ -141,4 +141,4 @@ A successful response looks like:
 ```
 
 ### DISCLAIMER
-This code is for educational and research purposes only.
+This code is for educational and research purposes only. Please use with caution.
