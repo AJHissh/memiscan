@@ -71,14 +71,14 @@ build.bat full
 
 ---
 
-## 6. (Optional) MCP server — drive Memiscani from an AI agent (Claude Code)
+## 6. (Optional) MCP server — drive Memiscani from an AI agent (Claude)
 
 Memiscani can expose its tools over an **MCP** connection
 
 ### Flow
 
 ```
-Claude Code  ──stdio MCP──▶  mcp\memiscani_mcp.py  ──loopback TCP JSON──▶  memiscani_im.exe
+Claude ──stdio MCP──▶  mcp\memiscani_mcp.py  ──loopback TCP JSON──▶  memiscani_im.exe
                               (Python bridge)        127.0.0.1:8377          (mem_ipc server,
                                                      token-authenticated)     runs on the UI thread)
                                                                               │
@@ -103,8 +103,8 @@ automatically. When it is listening, the status bar shows **`MCP :8377`**.
 1. Build and launch `memiscani_im.exe` (sections 1–5). Confirm the status bar
    shows **`MCP :8377`**.
 2. Install the Python package: `pip install mcp`.
-3. The included **`.mcp.json`** registers the server with Claude Code for this
-   project. **Restart / reload Claude Code** so it picks up the new server, then
+3. The included **`.mcp.json`** registers the server with Claude for this
+   project. **Restart / reload Claude ** so it picks up the new server, then
    approve the `memiscani` server when prompted. Verify with `/mcp` (it should
    list `memiscani` and its tools).
 
