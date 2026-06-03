@@ -139,3 +139,6 @@ A successful response looks like:
 ```json
 {"id":1,"ok":true,"result":{"attached":false,"base":"0x0","scanRunning":false, ...}}
 ```
+
+### DISCLAIMER
+This code is for educational and research purposes only.
