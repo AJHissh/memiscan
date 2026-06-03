@@ -82,7 +82,6 @@ def _call(cmd: str, args: Optional[dict] = None, _retry: bool = True) -> dict:
     resp = json.loads(line)
     if not resp.get("ok"):
         err = resp.get("error", "unknown error")
-        # Token may be stale (GUI restarted -> new token). Re-read once and retry.
         if _retry and "unauthorized" in err.lower():
             _TOKEN = _read_token()
             if _TOKEN:
@@ -106,9 +105,6 @@ def _wait_for_scan(max_seconds: float = 120.0) -> dict:
     return _call("scan_status")
 
 
-# ---------------------------------------------------------------------------
-# Session / process
-# ---------------------------------------------------------------------------
 @mcp.tool()
 def status() -> dict:
     """Get the live memiscani session state: attached pid, base address, scan
@@ -146,10 +142,6 @@ def list_modules() -> dict:
     """List loaded modules in the attached process: [{name, base, size, path}]."""
     return _call("list_modules")
 
-
-# ---------------------------------------------------------------------------
-# Read / write
-# ---------------------------------------------------------------------------
 @mcp.tool()
 def read(addr: str, type: str = "int32", len: int = 64) -> dict:
     """Read a typed value at an address. addr is hex ("0x...") or decimal.
@@ -186,9 +178,6 @@ def disasm(addr: str, bytes: int = 64, count: int = 16) -> dict:
     return _call("disasm", {"addr": addr, "bytes": bytes, "count": count})
 
 
-# ---------------------------------------------------------------------------
-# Scanning
-# ---------------------------------------------------------------------------
 @mcp.tool()
 def scan_first(
     type: str = "int32",
@@ -260,9 +249,6 @@ def clear_scan() -> dict:
     return _call("clear_scan")
 
 
-# ---------------------------------------------------------------------------
-# Analysis
-# ---------------------------------------------------------------------------
 @mcp.tool()
 def guess_type(addr: str) -> dict:
     """Heuristically rank plausible data types at an address:
@@ -289,9 +275,6 @@ def aob_signature(addr: str, minLen: int = 12, maxLen: int = 64) -> dict:
     return _call("aob_signature", {"addr": addr, "minLen": minLen, "maxLen": maxLen})
 
 
-# ---------------------------------------------------------------------------
-# Lua scripting (runs against the target via the memiscani Lua engine)
-# ---------------------------------------------------------------------------
 @mcp.tool()
 def run_lua(source: str) -> dict:
     """Run a Lua script in the memiscani engine against the attached process.
