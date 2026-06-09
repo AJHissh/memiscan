@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-memiscani MCP bridge.
-
-Exposes the running memiscani GUI's memory-analysis tools to an MCP client
-(e.g. Claude Code) by forwarding each tool call as a newline-delimited JSON
-command to the GUI's loopback TCP server (mem_ipc, default 127.0.0.1:8377).
-
-Requirements:
-    pip install mcp
-Run (normally launched by the MCP client via .mcp.json):
-    python mcp/memiscani_mcp.py
-
-The memiscani GUI must be running with its MCP server listening (shown as
-"MCP :8377" in the status bar).
-"""
 import json
 import os
 import socket
@@ -34,7 +18,6 @@ class MemiscaniError(RuntimeError):
 
 
 def _token_path() -> str:
-    """Location of the per-user auth token file written by the GUI."""
     p = os.environ.get("MEMISCANI_MCP_TOKEN_FILE")
     if p:
         return p
@@ -43,7 +26,6 @@ def _token_path() -> str:
 
 
 def _read_token() -> str:
-    """Read the auth token (env override first, then the token file)."""
     t = os.environ.get("MEMISCANI_MCP_TOKEN")
     if t:
         return t.strip()
@@ -58,7 +40,6 @@ _TOKEN = _read_token()
 
 
 def _call(cmd: str, args: Optional[dict] = None, _retry: bool = True) -> dict:
-    """Send one command to the GUI (with the auth token) and return its result."""
     global _TOKEN
     payload = json.dumps({"id": 1, "cmd": cmd, "args": args or {}, "token": _TOKEN}) + "\n"
     try:
@@ -95,7 +76,6 @@ def _call(cmd: str, args: Optional[dict] = None, _retry: bool = True) -> dict:
 
 
 def _wait_for_scan(max_seconds: float = 120.0) -> dict:
-    """Block until the current scan finishes (or times out); return scan_status."""
     deadline = time.time() + max_seconds
     while time.time() < deadline:
         st = _call("scan_status")
@@ -107,22 +87,16 @@ def _wait_for_scan(max_seconds: float = 120.0) -> dict:
 
 @mcp.tool()
 def status() -> dict:
-    """Get the live memiscani session state: attached pid, base address, scan
-    running flag, current result count, live-monitor/lua status, and MCP stats."""
     return _call("status")
 
 
 @mcp.tool()
 def list_processes(name: str = "") -> dict:
-    """List running processes, optionally filtered by a case-sensitive substring
-    of the process name. Returns [{pid, name}]."""
     return _call("list_processes", {"name": name})
 
 
 @mcp.tool()
 def attach(pid: int = 0, name: str = "") -> dict:
-    """Attach to a target process by pid or by name substring (first match).
-    Returns {attached, pid, base}."""
     args: dict[str, Any] = {}
     if pid:
         args["pid"] = pid
@@ -133,48 +107,35 @@ def attach(pid: int = 0, name: str = "") -> dict:
 
 @mcp.tool()
 def detach() -> dict:
-    """Detach from the current process (closes the handle, keeps scan results)."""
     return _call("detach")
 
 
 @mcp.tool()
 def list_modules() -> dict:
-    """List loaded modules in the attached process: [{name, base, size, path}]."""
     return _call("list_modules")
 
 @mcp.tool()
 def read(addr: str, type: str = "int32", len: int = 64) -> dict:
-    """Read a typed value at an address. addr is hex ("0x...") or decimal.
-    type: int8/int16/int32/int64/float/double/string/aob. For string/aob, `len`
-    is the number of bytes to read (max 1024). Returns {addr, type, value, hex}."""
     return _call("read", {"addr": addr, "type": type, "len": len})
 
 
 @mcp.tool()
 def read_bytes(addr: str, size: int = 64) -> dict:
-    """Read raw bytes at an address (max 4096). Returns {addr, size, hex}."""
     return _call("read_bytes", {"addr": addr, "size": size})
 
 
 @mcp.tool()
 def write(addr: str, type: str, value: str, bypass: bool = True) -> dict:
-    """Write a typed numeric value at an address. type: int8/16/32/64/float/double.
-    value is a string ("1234", "0x1F", "3.5"). bypass=True flips page protection
-    if needed. For strings/bytes use write_bytes."""
     return _call("write", {"addr": addr, "type": type, "value": value, "bypass": bypass})
 
 
 @mcp.tool()
 def write_bytes(addr: str, hex: str, bypass: bool = True) -> dict:
-    """Write raw bytes at an address. `hex` is like "90 90 C3" or "0x90,0x90".
-    bypass=True flips page protection if needed. Returns {addr, count}."""
     return _call("write_bytes", {"addr": addr, "hex": hex, "bypass": bypass})
 
 
 @mcp.tool()
 def disasm(addr: str, bytes: int = 64, count: int = 16) -> dict:
-    """Disassemble up to `count` x86-64 instructions starting at addr, reading at
-    most `bytes` bytes. Returns {lines:[{addr, bytes, text}]}."""
     return _call("disasm", {"addr": addr, "bytes": bytes, "count": count})
 
 
@@ -221,9 +182,6 @@ def scan_first(
 
 @mcp.tool()
 def scan_next(match: str = "changed", value: str = "", wait: bool = True) -> dict:
-    """Refine the current results with a next scan using the same data type.
-    match: exact/changed/unchanged/increased/decreased/unknown.
-    Returns scan_status {running,count} when wait=True."""
     started = _call("scan_next", {"match": match, "value": value})
     if wait:
         return _wait_for_scan()
@@ -232,36 +190,27 @@ def scan_next(match: str = "changed", value: str = "", wait: bool = True) -> dic
 
 @mcp.tool()
 def scan_status() -> dict:
-    """Return {running, count} for the current/last scan."""
     return _call("scan_status")
 
 
 @mcp.tool()
 def get_results(offset: int = 0, limit: int = 200) -> dict:
-    """Fetch a window of scan results with live values:
-    {results:[{index, addr, value}], total, type}. limit max 1000."""
     return _call("get_results", {"offset": offset, "limit": limit})
 
 
 @mcp.tool()
 def clear_scan() -> dict:
-    """Clear all scan results, snapshot, and live-monitor data."""
     return _call("clear_scan")
 
 
 @mcp.tool()
 def guess_type(addr: str) -> dict:
-    """Heuristically rank plausible data types at an address:
-    {guesses:[{type, formatted, plausibility, reason}]}."""
     return _call("guess_type", {"addr": addr})
 
 
 @mcp.tool()
 def pointer_chain_resolve(moduleName: str = "", moduleOffset: str = "0",
                           offsets: Optional[list] = None) -> dict:
-    """Resolve a pointer chain: base = module(moduleName)+moduleOffset (or a raw
-    address if moduleName empty), then dereference through `offsets` (list of hex
-    or int). Returns {addr}."""
     return _call("pointer_chain_resolve", {
         "moduleName": moduleName, "moduleOffset": moduleOffset,
         "offsets": offsets or [],
@@ -270,36 +219,26 @@ def pointer_chain_resolve(moduleName: str = "", moduleOffset: str = "0",
 
 @mcp.tool()
 def aob_signature(addr: str, minLen: int = 12, maxLen: int = 64) -> dict:
-    """Generate a unique AOB signature for the code at addr (marks relocatable
-    bytes as wildcards). Returns {pattern, length, wildcards, hits, unique}."""
     return _call("aob_signature", {"addr": addr, "minLen": minLen, "maxLen": maxLen})
 
 
 @mcp.tool()
 def run_lua(source: str) -> dict:
-    """Run a Lua script in the memiscani engine against the attached process.
-    Available globals: mem.attach/detach/pid/base/find_module/read_typed/
-    write_typed/read_bytes/write_bytes/alloc/free/disasm/aob_scan/sleep/protect,
-    plus log()/print(). Use lua_log to read output. Returns {started}."""
     return _call("run_lua", {"source": source})
 
 
 @mcp.tool()
 def lua_status() -> dict:
-    """Return {running} for the Lua engine."""
     return _call("lua_status")
 
 
 @mcp.tool()
 def lua_stop() -> dict:
-    """Request the running Lua script to stop."""
     return _call("lua_stop")
 
 
 @mcp.tool()
 def lua_log(clear: bool = False) -> dict:
-    """Fetch the Lua output log lines. Set clear=True to also clear it afterwards.
-    Returns {lines:[...]}."""
     return _call("lua_log", {"clear": clear})
 
 
