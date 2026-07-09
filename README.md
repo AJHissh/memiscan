@@ -10,7 +10,6 @@
 
 The build needs `gcc`, `g++`, and `ar` in `PATH`.
 
-
 ## 2. Create project folder
 
 At minimum you need these files / directories in the project root:
