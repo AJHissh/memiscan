@@ -8,8 +8,7 @@
 
 ## 1. Install MinGW-w64 (the C/C++ compiler)
 
-The build needs `gcc`, `g++`, and `ar` (the archiver) in `PATH`.  Pick
-**one** of the options below.
+The build needs `gcc`, `g++`, and `ar` (the archiver) in `PATH`.
 
 
 ## 2. Create project folder
